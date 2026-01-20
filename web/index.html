@@ -39,6 +39,15 @@
       z-index:10
     }
     .brand{font-weight:700;letter-spacing:.3px}
+    .admin-icons{display:flex;gap:8px;margin-left:16px}
+    .icon-btn{background:none;border:none;color:var(--text);font-size:18px;cursor:pointer;padding:4px;border-radius:4px}
+    .icon-btn:hover{background:var(--border)}
+    .icon-btn:disabled{opacity:0.5;cursor:not-allowed}
+    .icon-dropdown{position:relative}
+    .dropdown-menu{display:none;position:absolute;top:100%;left:0;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:200px;z-index:20}
+    .dropdown-menu.show{display:block}
+    .dropdown-item{background:none;border:none;color:var(--text);padding:8px 12px;width:100%;text-align:left;cursor:pointer;border-radius:4px}
+    .dropdown-item:hover{background:var(--border)}
     .spacer{flex:1}
     .btn{
       background:#1f2937;
@@ -579,6 +588,15 @@
 
   <div class="top">
     <div class="brand">Varizemed • CRM</div>
+    <div class="admin-icons">
+      <div class="icon-dropdown">
+        <button class="icon-btn" id="adminTools" title="Ferramentas Administrativas">🔧</button>
+        <div class="dropdown-menu" id="adminMenu">
+          <button class="dropdown-item" id="reopenConversations">Reabrir conversas fora de 24h não resolvidas</button>
+        </div>
+      </div>
+      <button class="icon-btn" id="calendarIcon" title="Agenda" disabled>📅</button>
+    </div>
     <div class="spacer"></div>
     <div id="connDot" title="stream">●</div>
     <button class="btn" id="btnSettings">Configurar</button>

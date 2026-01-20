@@ -1184,6 +1184,46 @@ def proxy_media(conversation_id, message_id):
         app.logger.error("Media proxy error: %s", e)
         return jsonify(error={"code":"PROXY_ERROR","message":str(e)}), 500
 
+# ================== Admin Tools ==================
+@app.post("/api/admin/reopen-outdated-conversations")
+@login_required
+def reopen_outdated_conversations():
+    """Reabre todas as conversas não resolvidas que estão fora da janela de 24h."""
+    try:
+        # Buscar conversas não resolvidas (bot, pending, claimed) fora de 24h
+        outdated_convs = []
+        for status in ['bot', 'pending', 'claimed']:
+            convs_ref = db.collection('conversations').where('status', '==', status).stream()
+            for conv_doc in convs_ref:
+                conv_data = conv_doc.to_dict()
+                conv_id = conv_doc.id
+                if _is_outside_24h_window(conv_id):
+                    outdated_convs.append((conv_id, conv_data))
+        
+        # Reabrir cada conversa
+        reopened_count = 0
+        for conv_id, conv_data in outdated_convs:
+            # Atualizar status para 'bot' e limpar claimed_by se necessário
+            update_data = {
+                'status': 'bot',
+                'updated_at': firestore.SERVER_TIMESTAMP
+            }
+            if 'claimed_by' in conv_data:
+                update_data['claimed_by'] = firestore.DELETE_FIELD
+            
+            db.collection('conversations').document(conv_id).update(update_data)
+            reopened_count += 1
+            
+            # Log do evento
+            log_event('conversation_reopened_admin', conversation_id=conv_id, reason='outdated_window')
+        
+        app.logger.info(f"Reopened {reopened_count} outdated conversations")
+        return jsonify(success=True, reopened_count=reopened_count), 200
+        
+    except Exception as e:
+        app.logger.error(f"Error reopening outdated conversations: {e}")
+        return jsonify(error={"code":"REOPEN_ERROR","message":str(e)}), 500
+
 # ================== Cache e SPA fallback ==================
 @app.after_request
 def add_cache_headers_after(resp):
