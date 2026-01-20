@@ -1801,6 +1801,7 @@ async function bootstrap() {
   else startNormalPolling();
 }
 
+if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', bootstrap);
 } else {
   bootstrap();
