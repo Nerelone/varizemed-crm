@@ -1,0 +1,37 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.1.0] - 2026-01-16
+
+### Added
+- Robust parameter extraction from Dialogflow CX responses (query_result.parameters, sessionInfo.parameters)
+- Compatibility for handoff parameter names (handoff_request, handoff_requested)
+- CPU always allocated in Cloud Run for reliable async processing
+- Concurrency set to 10 to prevent overload
+
+### Fixed
+- Handoff detection bug when conversation was resolved
+- Missing handoff_request parameter capture from sessionInfo
+- Async processing reliability with CPU throttling disabled
+
+### Changed
+- Standardized DF_HANDOFF_PARAM to handoff_request
+
+## [1.0.0] - 2026-01-08
+
+### Added
+- Automatic retry mechanism for SSLEOFError with exponential backoff
+- HTTP session with retry configuration for Twilio API calls
+- SSL/connection error handling across webh and crm-api services
+
+### Changed
+- Replaced direct requests calls with retry-enabled session in send_whatsapp_text, send_twilio_template, _twilio_send_whatsapp, _twilio_send_template, proxy_media
+
+### Technical Details
+- Retry parameters: total=3, backoff_factor=0.5, status_forcelist=(500,502,503,504)
