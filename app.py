@@ -1203,19 +1203,28 @@ def reopen_outdated_conversations():
         # Reabrir cada conversa
         reopened_count = 0
         for conv_id, conv_data in outdated_convs:
-            # Atualizar status para 'bot' e limpar claimed_by se necessário
-            update_data = {
-                'status': 'bot',
-                'updated_at': firestore.SERVER_TIMESTAMP
-            }
-            if 'claimed_by' in conv_data:
-                update_data['claimed_by'] = firestore.DELETE_FIELD
+            current_status = conv_data.get('status')
+            
+            # Lógica de reabertura baseada no status atual
+            if current_status == 'bot':
+                # Continua em bot
+                update_data = {
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                }
+            else:
+                # claimed ou pending -> volta para claimed (sem claimed_by)
+                update_data = {
+                    'status': 'claimed',
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                }
+                if 'claimed_by' in conv_data:
+                    update_data['claimed_by'] = firestore.DELETE_FIELD
             
             db.collection('conversations').document(conv_id).update(update_data)
             reopened_count += 1
             
             # Log do evento
-            log_event('conversation_reopened_admin', conversation_id=conv_id, reason='outdated_window')
+            log_event('conversation_reopened_admin', conversation_id=conv_id, reason='outdated_window', previous_status=current_status)
         
         app.logger.info(f"Reopened {reopened_count} outdated conversations")
         return jsonify(success=True, reopened_count=reopened_count), 200
