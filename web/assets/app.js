@@ -78,6 +78,12 @@ const els = {
   cfgUsePrefixToggle: document.getElementById('cfgUsePrefixToggle'),
   cfgUsePrefixContainer: document.getElementById('cfgUsePrefixContainer'),
   btnSaveCfg: document.getElementById('btnSaveCfg'),
+  
+  // Admin icons
+  adminTools: document.getElementById('adminTools'),
+  adminMenu: document.getElementById('adminMenu'),
+  reopenConversations: document.getElementById('reopenConversations'),
+  calendarIcon: document.getElementById('calendarIcon'),
   btnSettings: document.getElementById('btnSettings'),
   connDot: document.getElementById('connDot'),
   
@@ -1800,3 +1806,36 @@ if (document.readyState === 'loading') {
 } else {
   bootstrap();
 }
+
+// ====== Admin Tools Event Listeners ======
+els.adminTools.addEventListener('click', (e) => {
+  e.stopPropagation();
+  els.adminMenu.classList.toggle('show');
+});
+
+document.addEventListener('click', () => {
+  els.adminMenu.classList.remove('show');
+});
+
+els.reopenConversations.addEventListener('click', async () => {
+  if (!confirm('Tem certeza que deseja reabrir todas as conversas não resolvidas fora da janela de 24h?')) return;
+  
+  try {
+    const resp = await fetch('/api/admin/reopen-outdated-conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    if (resp.ok) {
+      toast('Conversas reabertas com sucesso!');
+      // Refresh conversations
+      loadConversations(true);
+    } else {
+      throw new Error('Falha ao reabrir conversas');
+    }
+  } catch (e) {
+    toast('Erro: ' + e.message);
+  }
+  
+  els.adminMenu.classList.remove('show');
+});
