@@ -277,11 +277,11 @@ def _twilio_send_whatsapp(to_e164_plus: str, text: str):
     except requests.RequestException as e:
         return False, {"code": "TWILIO_REQ", "message": str(e)}
 
-def _twilio_send_template(to_e164_plus: str, template_sid: str):
+def _twilio_send_template(to_e164_plus: str, template_sid: str, variables: dict = None):
     """
     Envia template aprovado do WhatsApp via Twilio Content API
     
-    ATUALIZADO: Templates sem variáveis (mensagem fixa)
+    ATUALIZADO: Suporte a variáveis nos templates
     """
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
     
@@ -291,7 +291,11 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str):
         "ContentSid": template_sid
     }
     
-    app.logger.info(f" Enviando template {template_sid} (sem variáveis)")
+    if variables:
+        data["ContentVariables"] = json.dumps(variables)
+        app.logger.info(f" Enviando template {template_sid} com variáveis: {variables}")
+    else:
+        app.logger.info(f" Enviando template {template_sid} SEM variáveis - data: {data}")
     
     try:
         # PATCH: Usando http_session com retry automático
@@ -303,9 +307,10 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str):
             try:
                 j = resp.json()
                 code = j.get("code"); msg = j.get("message")
+                app.logger.error(f" Twilio template error {resp.status_code}: code={code}, message={msg}, full_response={j}")
             except Exception:
                 code = None; msg = resp.text[:200]
-            app.logger.error(f" Twilio template error {resp.status_code}: {msg}")
+                app.logger.error(f" Twilio template error {resp.status_code}: response_text={msg}")
             return False, {"code": f"TWILIO_{resp.status_code}", "message": msg or "Twilio template error"}
     except requests.RequestException as e:
         app.logger.error(f" Twilio request error: {e}")
@@ -915,16 +920,23 @@ def reopen_conversation(conversation_id):
     conv = snap.to_dict()
     status = conv.get("status", "bot")
 
-    # Escolhe template baseado no status (NOVOS SIDs - sem variáveis)
+    # Escolhe template baseado no status
     if status == "pending_handoff":
-        template_sid = "HX81278770ead9c28b5bc5f10cae22939c"  # copy_br_varizemed_handoff_request
+        template_sid = "HX188d07372607508d8e1d616af8297bb3"  # br_varizemed_retomada_atendimento_pendente
         template_name = "handoff_request"
     else:
-        template_sid = "HX781713946af17950d9fc8914cc14d1b3"  # copy_br_varizemed_retomada_atendimento_pendente
+        template_sid = "HX188d07372607508d8e1d616af8297bb3"  # br_varizemed_retomada_atendimento_pendente
         template_name = "retomada_atendimento"
 
-    # Envia template (sem variáveis)
-    ok, info = _twilio_send_template(conversation_id, template_sid)
+    # Buscar user_name dos session_parameters
+    user_name = _extract_user_name(conv).strip()
+    if not user_name:
+        user_name = "Sr(a)"
+    
+    variables = {"user_name": user_name}
+
+    # Envia template com variáveis
+    ok, info = _twilio_send_template(conversation_id, template_sid, variables)
     
     if not ok:
         log_event("reopen_error", conversation_id=conversation_id, agent_id=agent_id,
@@ -1183,6 +1195,72 @@ def proxy_media(conversation_id, message_id):
     except Exception as e:
         app.logger.error("Media proxy error: %s", e)
         return jsonify(error={"code":"PROXY_ERROR","message":str(e)}), 500
+
+# ================== Admin Tools ==================
+@app.post("/api/admin/reopen-outdated-conversations")
+@login_required
+def reopen_outdated_conversations():
+    """Reabre todas as conversas não resolvidas que estão fora da janela de 24h."""
+    try:
+        # Buscar conversas não resolvidas (bot, pending, claimed) fora de 24h
+        outdated_convs = []
+        for status in ['bot', 'pending', 'claimed']:
+            convs_ref = fs.collection(FS_CONV_COLL).where('status', '==', status).stream()
+            for conv_doc in convs_ref:
+                conv_data = conv_doc.to_dict()
+                conv_id = conv_doc.id
+                if _is_outside_24h_window(conv_id):
+                    outdated_convs.append((conv_id, conv_data))
+        
+        # Reabrir cada conversa
+        reopened_count = 0
+        for conv_id, conv_data in outdated_convs:
+            current_status = conv_data.get('status')
+            system_text = "Conversa reaberta automaticamente (fora da janela de 24h)"
+            
+            # Lógica de reabertura baseada no status atual
+            if current_status == 'bot':
+                # Continua em bot
+                update_data = {
+                    'updated_at': firestore.SERVER_TIMESTAMP,
+                    'last_message_text': system_text[:200],
+                    'last_message_by': 'system:reopen'
+                }
+            else:
+                # claimed ou pending -> volta para claimed (sem claimed_by)
+                update_data = {
+                    'status': 'claimed',
+                    'updated_at': firestore.SERVER_TIMESTAMP,
+                    'last_message_text': system_text[:200],
+                    'last_message_by': 'system:reopen'
+                }
+                if 'claimed_by' in conv_data:
+                    update_data['claimed_by'] = firestore.DELETE_FIELD
+            
+            # Registra mensagem de sistema para aparecer na UI
+            message_id = str(uuid.uuid4())
+            msg_doc = {
+                "message_id": message_id,
+                "direction": "out",
+                "by": "system:reopen",
+                "display_name": "Sistema",
+                "text": system_text,
+                "ts": firestore.SERVER_TIMESTAMP,
+            }
+            messages_ref(conv_id).document(message_id).set(msg_doc)
+
+            fs.collection(FS_CONV_COLL).document(conv_id).update(update_data)
+            reopened_count += 1
+            
+            # Log do evento
+            log_event('conversation_reopened_admin', conversation_id=conv_id, reason='outdated_window', previous_status=current_status)
+        
+        app.logger.info(f"Reopened {reopened_count} outdated conversations")
+        return jsonify(success=True, reopened_count=reopened_count), 200
+        
+    except Exception as e:
+        app.logger.error(f"Error reopening outdated conversations: {e}")
+        return jsonify(error={"code":"REOPEN_ERROR","message":str(e)}), 500
 
 # ================== Cache e SPA fallback ==================
 @app.after_request
