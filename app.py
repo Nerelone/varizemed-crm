@@ -929,8 +929,7 @@ def reopen_conversation(conversation_id):
         template_name = "retomada_atendimento"
 
     # Buscar user_name dos session_parameters
-    session_params = conv.get("session_parameters", {})
-    user_name = session_params.get("user_name", "").strip()
+    user_name = _extract_user_name(conv).strip()
     if not user_name:
         user_name = "Sr(a)"
     
