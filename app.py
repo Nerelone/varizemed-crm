@@ -277,11 +277,11 @@ def _twilio_send_whatsapp(to_e164_plus: str, text: str):
     except requests.RequestException as e:
         return False, {"code": "TWILIO_REQ", "message": str(e)}
 
-def _twilio_send_template(to_e164_plus: str, template_sid: str):
+def _twilio_send_template(to_e164_plus: str, template_sid: str, variables: dict = None):
     """
     Envia template aprovado do WhatsApp via Twilio Content API
     
-    ATUALIZADO: Templates sem variáveis (mensagem fixa)
+    ATUALIZADO: Suporte a variáveis nos templates
     """
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
     
@@ -291,7 +291,11 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str):
         "ContentSid": template_sid
     }
     
-    app.logger.info(f" Enviando template {template_sid} (sem variáveis)")
+    if variables:
+        data["ContentVariables"] = json.dumps(variables)
+        app.logger.info(f" Enviando template {template_sid} com variáveis: {variables}")
+    else:
+        app.logger.info(f" Enviando template {template_sid} (sem variáveis)")
     
     try:
         # PATCH: Usando http_session com retry automático
@@ -915,16 +919,24 @@ def reopen_conversation(conversation_id):
     conv = snap.to_dict()
     status = conv.get("status", "bot")
 
-    # Escolhe template baseado no status (NOVOS SIDs - sem variáveis)
+    # Escolhe template baseado no status
     if status == "pending_handoff":
-        template_sid = "HX81278770ead9c28b5bc5f10cae22939c"  # copy_br_varizemed_handoff_request
+        template_sid = "HXb1361a0ac2b97d83561b74be18c08ea7"  # br_varizemed_retomada_atendimento_pendente
         template_name = "handoff_request"
     else:
-        template_sid = "HX781713946af17950d9fc8914cc14d1b3"  # copy_br_varizemed_retomada_atendimento_pendente
+        template_sid = "HXb1361a0ac2b97d83561b74be18c08ea7"  # br_varizemed_retomada_atendimento_pendente
         template_name = "retomada_atendimento"
 
-    # Envia template (sem variáveis)
-    ok, info = _twilio_send_template(conversation_id, template_sid)
+    # Buscar user_name dos session_parameters
+    session_params = conv.get("session_parameters", {})
+    user_name = session_params.get("user_name", "").strip()
+    if not user_name:
+        user_name = "Sr(a)"
+    
+    variables = {"user_name": user_name}
+
+    # Envia template com variáveis
+    ok, info = _twilio_send_template(conversation_id, template_sid, variables)
     
     if not ok:
         log_event("reopen_error", conversation_id=conversation_id, agent_id=agent_id,
