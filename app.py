@@ -295,7 +295,7 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str, variables: dict 
         data["ContentVariables"] = json.dumps(variables)
         app.logger.info(f" Enviando template {template_sid} com variáveis: {variables}")
     else:
-        app.logger.info(f" Enviando template {template_sid} (sem variáveis)")
+        app.logger.info(f" Enviando template {template_sid} SEM variáveis - data: {data}")
     
     try:
         # PATCH: Usando http_session com retry automático
