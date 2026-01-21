@@ -935,8 +935,8 @@ def reopen_conversation(conversation_id):
     
     variables = {"user_name": user_name}
 
-    # Envia template com variáveis
-    ok, info = _twilio_send_template(conversation_id, template_sid, variables)
+    # Envia template SEM variáveis por enquanto (debug)
+    ok, info = _twilio_send_template(conversation_id, template_sid)
     
     if not ok:
         log_event("reopen_error", conversation_id=conversation_id, agent_id=agent_id,
