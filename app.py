@@ -307,9 +307,10 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str, variables: dict 
             try:
                 j = resp.json()
                 code = j.get("code"); msg = j.get("message")
+                app.logger.error(f" Twilio template error {resp.status_code}: code={code}, message={msg}, full_response={j}")
             except Exception:
                 code = None; msg = resp.text[:200]
-            app.logger.error(f" Twilio template error {resp.status_code}: {msg}")
+                app.logger.error(f" Twilio template error {resp.status_code}: response_text={msg}")
             return False, {"code": f"TWILIO_{resp.status_code}", "message": msg or "Twilio template error"}
     except requests.RequestException as e:
         app.logger.error(f" Twilio request error: {e}")
