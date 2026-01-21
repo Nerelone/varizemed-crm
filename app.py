@@ -922,10 +922,10 @@ def reopen_conversation(conversation_id):
 
     # Escolhe template baseado no status
     if status == "pending_handoff":
-        template_sid = "HXb1361a0ac2b97d83561b74be18c08ea7"  # br_varizemed_retomada_atendimento_pendente
+        template_sid = "HX188d07372607508d8e1d616af8297bb3"  # br_varizemed_retomada_atendimento_pendente
         template_name = "handoff_request"
     else:
-        template_sid = "HXb1361a0ac2b97d83561b74be18c08ea7"  # br_varizemed_retomada_atendimento_pendente
+        template_sid = "HX188d07372607508d8e1d616af8297bb3"  # br_varizemed_retomada_atendimento_pendente
         template_name = "retomada_atendimento"
 
     # Buscar user_name dos session_parameters
@@ -935,8 +935,8 @@ def reopen_conversation(conversation_id):
     
     variables = {"user_name": user_name}
 
-    # Envia template SEM variáveis por enquanto (debug)
-    ok, info = _twilio_send_template(conversation_id, template_sid)
+    # Envia template com variáveis
+    ok, info = _twilio_send_template(conversation_id, template_sid, variables)
     
     if not ok:
         log_event("reopen_error", conversation_id=conversation_id, agent_id=agent_id,
@@ -1205,7 +1205,7 @@ def reopen_outdated_conversations():
         # Buscar conversas não resolvidas (bot, pending, claimed) fora de 24h
         outdated_convs = []
         for status in ['bot', 'pending', 'claimed']:
-            convs_ref = db.collection('conversations').where('status', '==', status).stream()
+            convs_ref = fs.collection(FS_CONV_COLL).where('status', '==', status).stream()
             for conv_doc in convs_ref:
                 conv_data = conv_doc.to_dict()
                 conv_id = conv_doc.id
@@ -1216,23 +1216,40 @@ def reopen_outdated_conversations():
         reopened_count = 0
         for conv_id, conv_data in outdated_convs:
             current_status = conv_data.get('status')
+            system_text = "Conversa reaberta automaticamente (fora da janela de 24h)"
             
             # Lógica de reabertura baseada no status atual
             if current_status == 'bot':
                 # Continua em bot
                 update_data = {
-                    'updated_at': firestore.SERVER_TIMESTAMP
+                    'updated_at': firestore.SERVER_TIMESTAMP,
+                    'last_message_text': system_text[:200],
+                    'last_message_by': 'system:reopen'
                 }
             else:
                 # claimed ou pending -> volta para claimed (sem claimed_by)
                 update_data = {
                     'status': 'claimed',
-                    'updated_at': firestore.SERVER_TIMESTAMP
+                    'updated_at': firestore.SERVER_TIMESTAMP,
+                    'last_message_text': system_text[:200],
+                    'last_message_by': 'system:reopen'
                 }
                 if 'claimed_by' in conv_data:
                     update_data['claimed_by'] = firestore.DELETE_FIELD
             
-            db.collection('conversations').document(conv_id).update(update_data)
+            # Registra mensagem de sistema para aparecer na UI
+            message_id = str(uuid.uuid4())
+            msg_doc = {
+                "message_id": message_id,
+                "direction": "out",
+                "by": "system:reopen",
+                "display_name": "Sistema",
+                "text": system_text,
+                "ts": firestore.SERVER_TIMESTAMP,
+            }
+            messages_ref(conv_id).document(message_id).set(msg_doc)
+
+            fs.collection(FS_CONV_COLL).document(conv_id).update(update_data)
             reopened_count += 1
             
             # Log do evento
