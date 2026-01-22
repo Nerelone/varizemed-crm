@@ -74,6 +74,13 @@ TWILIO_ACCOUNT_SID = (os.getenv("TWILIO_ACCOUNT_SID", "") or "").strip()
 TWILIO_AUTH_TOKEN_REST = (os.getenv("TWILIO_AUTH_TOKEN_REST", "") or "").strip()
 TWILIO_FROM = (os.getenv("TWILIO_WHATSAPP_FROM", "") or "").strip()
 
+# Templates (WhatsApp Content API)
+# Defaults mantêm compatibilidade com o template já usado no endpoint /reopen.
+# Você pode sobrescrever via env vars se quiser usar templates diferentes por status.
+REOPEN_TEMPLATE_SID_DEFAULT = (os.getenv("TWILIO_REOPEN_TEMPLATE_SID", "HX188d07372607508d8e1d616af8297bb3") or "").strip()
+REOPEN_TEMPLATE_SID_PENDING_HANDOFF = (os.getenv("TWILIO_REOPEN_TEMPLATE_SID_PENDING_HANDOFF", REOPEN_TEMPLATE_SID_DEFAULT) or "").strip()
+REOPEN_TEMPLATE_SID_BOT = (os.getenv("TWILIO_REOPEN_TEMPLATE_SID_BOT", REOPEN_TEMPLATE_SID_DEFAULT) or "").strip()
+
 # Twilio signature (status callback)  usa o mesmo AUTH TOKEN, mas só p/ assinar
 TWILIO_AUTH_TOKEN_SIG = (os.getenv("TWILIO_AUTH_TOKEN", "") or "").strip()
 
@@ -187,6 +194,29 @@ def _parse_iso(s: str):
         return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         return None
+
+def _coerce_ts_to_dt(ts):
+    """Converte Timestamp/ISO/datetime para datetime UTC (timezone-aware)."""
+    if ts is None:
+        return None
+    try:
+        # Firestore costuma devolver DatetimeWithNanoseconds (subclasse de datetime)
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
+            return ts.astimezone(timezone.utc)
+    except Exception:
+        pass
+    # ISO string
+    if isinstance(ts, str):
+        return _parse_iso(ts)
+    # Fallback genérico (objetos com .timestamp)
+    try:
+        if hasattr(ts, "timestamp"):
+            return datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
+    except Exception:
+        return None
+    return None
 
 def _encode_cursor(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode()
@@ -316,68 +346,56 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str, variables: dict 
         app.logger.error(f" Twilio request error: {e}")
         return False, {"code": "TWILIO_REQ", "message": str(e)}
 
-def _is_outside_24h_window(conversation_id: str) -> bool:
-    """
-    Verifica se a última mensagem INBOUND da conversa está fora da janela de 24h
+def _is_outside_24h_window(conversation_id: str, conv_data: dict | None = None, conv_doc_ref=None) -> bool:
+    """Verifica se a última mensagem INBOUND está fora da janela de 24h.
+
+    Otimização:
+    - Usa conversations.last_inbound_at quando existir (barato e rápido)
+    - Se não existir, faz fallback lendo poucas mensagens mais recentes e preenche last_inbound_at
     """
     try:
-        app.logger.info(f" Verificando janela 24h para {conversation_id}")
-        
-        # NOVA ABORDAGEM: Busca todas mensagens inbound sem order_by
-        # Isso evita problema de índice composto no Firestore
-        msgs_query = (messages_ref(conversation_id)
-                     .where("direction", "==", "in")
-                     .stream())
-        
-        msgs_list = list(msgs_query)
-        app.logger.info(f" Total de mensagens inbound encontradas: {len(msgs_list)}")
-        
-        if not msgs_list:
-            app.logger.warning(f" ï¸ Nenhuma mensagem inbound encontrada para {conversation_id}")
-            app.logger.info(" Assumindo dentro da janela (sem mensagens inbound)")
-            return False
-        
-        # Encontra manualmente a mensagem mais recente
-        latest_msg = None
-        latest_time = None
-        
-        for msg in msgs_list:
-            data = msg.to_dict()
-            ts = data.get("ts")
-            
-            if ts:
-                # Parse timestamp
-                if hasattr(ts, 'timestamp'):
-                    msg_time = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
-                else:
-                    msg_time = _parse_iso(ts)
-                
-                if msg_time:
-                    if latest_time is None or msg_time > latest_time:
-                        latest_time = msg_time
-                        latest_msg = msg.id
-        
-        if latest_time is None:
-            app.logger.warning(f" ï¸ Nenhum timestamp válido encontrado nas mensagens inbound")
-            return False
-        
-        app.logger.info(f" Ultima mensagem inbound encontrada: {latest_msg}")
-        app.logger.info(f" Timestamp: {latest_time}")
-        
+        # 1) Tentativa: campo materializado no doc da conversa
+        last_inbound_at = None
+        if conv_data and isinstance(conv_data, dict):
+            last_inbound_at = conv_data.get("last_inbound_at")
+
+        last_dt = _coerce_ts_to_dt(last_inbound_at)
+
+        # 2) Fallback: buscar poucas mensagens recentes e achar a última inbound
+        if last_dt is None:
+            q = (messages_ref(conversation_id)
+                 .order_by("ts", direction=firestore.Query.DESCENDING)
+                 .limit(25))
+            for snap in q.stream():
+                d = snap.to_dict() or {}
+                if (d.get("direction") or "").lower() == "in":
+                    last_dt = _coerce_ts_to_dt(d.get("ts"))
+                    if last_dt:
+                        # Preenche no doc para próximas verificações (migração lazy)
+                        try:
+                            (conv_doc_ref or conv_ref(conversation_id)).set(
+                                {"last_inbound_at": d.get("ts"), "updated_at": firestore.SERVER_TIMESTAMP},
+                                merge=True
+                            )
+                        except Exception:
+                            pass
+                    break
+
+        # Sem inbound = janela fechada (para WhatsApp, precisa template)
+        if last_dt is None:
+            app.logger.info("[24h] %s: sem inbound -> fora da janela", conversation_id)
+            return True
+
         now = datetime.now(timezone.utc)
-        diff = now - latest_time
-        hours_diff = diff.total_seconds() / 3600
-        
-        app.logger.info(f" Agora: {now}")
-        app.logger.info(f" Diferença: {hours_diff:.2f} horas ({diff.days} dias)")
-        
+        diff = now - last_dt
         is_outside = diff > timedelta(hours=24)
-        app.logger.info(f"{' if is_outside else '} Fora da janela 24h: {is_outside}")
-        
+        app.logger.info("[24h] %s: last_inbound=%s diff_h=%.2f outside=%s",
+                        conversation_id, last_dt.isoformat(), diff.total_seconds()/3600, is_outside)
         return is_outside
-        
+
     except Exception as e:
-        app.logger.error(f" Erro ao checar janela 24h: {e}", exc_info=True)
+        app.logger.error("Erro ao checar janela 24h: %s", e, exc_info=True)
+        # Fail-safe: não bloquear ações (mas evite reabrir por engano)
         return False
 
 def _validate_twilio_signature(req):
@@ -657,6 +675,7 @@ def claim_conversation(conversation_id):
     ref.set({
         "status": "claimed",
         "assignee": agent_id,
+        "assignee_name": (display_name or agent_id),
         "updated_at": firestore.SERVER_TIMESTAMP,
         "handoff_active": False,
     }, merge=True)
@@ -696,6 +715,7 @@ def handoff_from_bot(conversation_id):
     ref.set({
         "status": "claimed",
         "assignee": agent_id,
+        "assignee_name": (display_name or agent_id),
         "updated_at": firestore.SERVER_TIMESTAMP,
     }, merge=True)
 
@@ -752,7 +772,16 @@ def check_24h_window(conversation_id):
     unauth = _require_auth(allow_session=True, allow_query=True)
     if unauth: return unauth
 
-    outside_window = _is_outside_24h_window(conversation_id)
+    # Usa last_inbound_at quando disponível
+    try:
+        ref = conv_ref(conversation_id)
+        snap = ref.get()
+        conv_data = snap.to_dict() if snap.exists else None
+    except Exception:
+        ref = None
+        conv_data = None
+
+    outside_window = _is_outside_24h_window(conversation_id, conv_data, ref)
     
     return jsonify({
         "conversation_id": conversation_id,
@@ -826,10 +855,18 @@ def debug_24h_window(conversation_id):
             if all_msg_infos:
                 debug_info["latest_message"] = all_msg_infos[0][1]
             
-            debug_info["outside_24h_window"] = _is_outside_24h_window(conversation_id)
+            try:
+                ref = conv_ref(conversation_id)
+                snap = ref.get()
+                conv_data = snap.to_dict() if snap.exists else None
+            except Exception:
+                ref = None
+                conv_data = None
+            debug_info["outside_24h_window"] = _is_outside_24h_window(conversation_id, conv_data, ref)
         else:
             debug_info["note"] = "Nenhuma mensagem inbound encontrada"
-            debug_info["outside_24h_window"] = False
+            # Sem inbound = janela fechada (precisa template)
+            debug_info["outside_24h_window"] = True
         
         return jsonify(debug_info), 200
         
@@ -904,14 +941,7 @@ def reopen_conversation(conversation_id):
     if not agent_id:
         return jsonify(error={"code": "MISSING_AGENT", "message": "agent_id required"}), 400
 
-    # Verifica se realmente está fora da janela
-    if not _is_outside_24h_window(conversation_id):
-        return jsonify(error={
-            "code": "WINDOW_OPEN", 
-            "message": "Conversa ainda está dentro da janela de 24h"
-        }), 400
-
-    # Busca conversa para verificar status
+    # Busca conversa para verificar status e last_inbound_at
     ref = conv_ref(conversation_id)
     snap = ref.get()
     if not snap.exists:
@@ -920,12 +950,22 @@ def reopen_conversation(conversation_id):
     conv = snap.to_dict()
     status = conv.get("status", "bot")
 
+    # Verifica se realmente está fora da janela (usa last_inbound_at quando disponível)
+    if not _is_outside_24h_window(conversation_id, conv, ref):
+        return jsonify(error={
+            "code": "WINDOW_OPEN",
+            "message": "Conversa ainda está dentro da janela de 24h"
+        }), 400
+
     # Escolhe template baseado no status
     if status == "pending_handoff":
-        template_sid = "HX188d07372607508d8e1d616af8297bb3"  # br_varizemed_retomada_atendimento_pendente
+        template_sid = REOPEN_TEMPLATE_SID_PENDING_HANDOFF
         template_name = "handoff_request"
+    elif status == "bot":
+        template_sid = REOPEN_TEMPLATE_SID_BOT
+        template_name = "retomada_bot"
     else:
-        template_sid = "HX188d07372607508d8e1d616af8297bb3"  # br_varizemed_retomada_atendimento_pendente
+        template_sid = REOPEN_TEMPLATE_SID_DEFAULT
         template_name = "retomada_atendimento"
 
     # Buscar user_name dos session_parameters
@@ -948,7 +988,7 @@ def reopen_conversation(conversation_id):
     by = f"system:template"
     
     # Mensagem de sistema inclui nome do ATENDENTE (quem reabriu)
-    system_text = f" Conversa reaberta por {display_name or agent_id}"
+    system_text = f"🔓 Conversa reaberta por {display_name or agent_id}"
     
     msg_doc = {
         "message_id": message_id,
@@ -984,13 +1024,29 @@ def reopen_conversation(conversation_id):
         "last_message_by": by,
         "reopened_at": firestore.SERVER_TIMESTAMP,
         "reopened_by": agent_id,
+        # Campos de dedup / auditoria do envio de template (usados no lote)
+        "last_reopen_template_at": firestore.SERVER_TIMESTAMP,
+        "last_reopen_template_sid": template_sid,
+        "last_reopen_template_by": agent_id,
+        "last_reopen_template_by_name": (display_name or agent_id),
         "handoff_active": False,  # Limpa flag de handoff
     }
-    
+
+    # Padroniza campos de assignee
+    if new_status in ("claimed", "active"):
+        update_data["assignee"] = agent_id
+        update_data["assignee_name"] = (display_name or agent_id)
+    else:
+        update_data["assignee"] = firestore.DELETE_FIELD
+        update_data["assignee_name"] = firestore.DELETE_FIELD
+
     # Se mudou o status, atualiza também
     if new_status != status:
         update_data["status"] = new_status
-        update_data["assignee"] = agent_id  # Atribui ao agente que reabriu
+
+    # Remove legado (se existir)
+    if isinstance(conv, dict) and "claimed_by" in conv:
+        update_data["claimed_by"] = firestore.DELETE_FIELD
     
     ref.set(update_data, merge=True)
     
@@ -1047,6 +1103,9 @@ def send_message(conversation_id):
 
     # Lógica de transição e verificação
     if st == "claimed":
+        # Se estiver claimed por outro agente, bloqueia
+        if assignee and assignee != agent_id:
+            return jsonify(error={"code":"FORBIDDEN","message":"Conversa claimed por outro agente"}), 403
         new_status = "active"
     elif st == "active":
         if assignee != agent_id:
@@ -1057,7 +1116,7 @@ def send_message(conversation_id):
     elif st in ("pending_handoff", "resolved"):
         return jsonify(error={"code":"INVALID","message":f"status={st} não permite envio"}), 400
     else:
-        return jsonify(error={"code":"INVALID","message":f"transição {st} -> {new_status} inválida"}), 400
+        return jsonify(error={"code":"INVALID","message":f"status={st} inválido para envio"}), 400
 
     # Aplica prefixo apenas se use_prefix for True
     if use_prefix and display_name:
@@ -1093,6 +1152,8 @@ def send_message(conversation_id):
     # Atualiza conversa
     ref.set({
         "status": status_after,
+        "assignee": agent_id,
+        "assignee_name": (display_name or agent_id),
         "updated_at": firestore.SERVER_TIMESTAMP,
         "last_message_text": prefixed_text[:200],
         "last_message_by": by
@@ -1200,67 +1261,154 @@ def proxy_media(conversation_id, message_id):
 @app.post("/api/admin/reopen-outdated-conversations")
 @login_required
 def reopen_outdated_conversations():
-    """Reabre todas as conversas não resolvidas que estão fora da janela de 24h."""
-    try:
-        # Buscar conversas não resolvidas (bot, pending, claimed) fora de 24h
-        outdated_convs = []
-        for status in ['bot', 'pending', 'claimed']:
-            convs_ref = fs.collection(FS_CONV_COLL).where('status', '==', status).stream()
-            for conv_doc in convs_ref:
-                conv_data = conv_doc.to_dict()
-                conv_id = conv_doc.id
-                if _is_outside_24h_window(conv_id):
-                    outdated_convs.append((conv_id, conv_data))
-        
-        # Reabrir cada conversa
-        reopened_count = 0
-        for conv_id, conv_data in outdated_convs:
-            current_status = conv_data.get('status')
-            system_text = "Conversa reaberta automaticamente (fora da janela de 24h)"
-            
-            # Lógica de reabertura baseada no status atual
-            if current_status == 'bot':
-                # Continua em bot
-                update_data = {
-                    'updated_at': firestore.SERVER_TIMESTAMP,
-                    'last_message_text': system_text[:200],
-                    'last_message_by': 'system:reopen'
-                }
-            else:
-                # claimed ou pending -> volta para claimed (sem claimed_by)
-                update_data = {
-                    'status': 'claimed',
-                    'updated_at': firestore.SERVER_TIMESTAMP,
-                    'last_message_text': system_text[:200],
-                    'last_message_by': 'system:reopen'
-                }
-                if 'claimed_by' in conv_data:
-                    update_data['claimed_by'] = firestore.DELETE_FIELD
-            
-            # Registra mensagem de sistema para aparecer na UI
-            message_id = str(uuid.uuid4())
-            msg_doc = {
-                "message_id": message_id,
-                "direction": "out",
-                "by": "system:reopen",
-                "display_name": "Sistema",
-                "text": system_text,
-                "ts": firestore.SERVER_TIMESTAMP,
-            }
-            messages_ref(conv_id).document(message_id).set(msg_doc)
+    """Reabre em lote conversas fora da janela de 24h enviando template via Twilio.
 
-            fs.collection(FS_CONV_COLL).document(conv_id).update(update_data)
-            reopened_count += 1
-            
-            # Log do evento
-            log_event('conversation_reopened_admin', conversation_id=conv_id, reason='outdated_window', previous_status=current_status)
-        
-        app.logger.info(f"Reopened {reopened_count} outdated conversations")
-        return jsonify(success=True, reopened_count=reopened_count), 200
-        
+    Regras implementadas:
+    - Corrige status legado 'pending' -> 'pending_handoff'
+    - Inclui bot, pending_handoff, claimed, active (e o legado pending)
+    - Envia template (_twilio_send_template)
+    - Dedup: não reenviar template se já enviou nas últimas 24h
+    - Otimiza janela 24h usando conversations.last_inbound_at (fallback com migração lazy)
+    - Padroniza assignee/assignee_name (remove claimed_by legado)
+    """
+
+    unauth = _require_auth(allow_session=True, allow_query=True)
+    if unauth:
+        return unauth
+
+    agent_id, display_name = _agent_from_headers(allow_query=True)
+    actor_name = (display_name or agent_id or "Sistema")
+
+    try:
+        candidate_statuses = ["bot", "pending_handoff", "pending", "claimed", "active"]
+        now = datetime.now(timezone.utc)
+
+        reopened_count = 0
+        skipped_recent = 0
+        skipped_window_open = 0
+        checked = 0
+        errors = []
+
+        for st in candidate_statuses:
+            q = fs.collection(FS_CONV_COLL).where("status", "==", st).stream()
+            for conv_doc in q:
+                checked += 1
+                conv_id = conv_doc.id
+                conv_data = conv_doc.to_dict() or {}
+                current_status = (conv_data.get("status") or st)
+
+                # Corrige status legado antes de qualquer coisa
+                normalized_status = "pending_handoff" if current_status == "pending" else current_status
+
+                # Dedup (já enviou template de reabertura nas últimas 24h)
+                last_sent_dt = _coerce_ts_to_dt(conv_data.get("last_reopen_template_at"))
+                if last_sent_dt and (now - last_sent_dt) < timedelta(hours=24):
+                    skipped_recent += 1
+                    continue
+
+                # Verifica janela 24h (usa last_inbound_at quando possível)
+                if not _is_outside_24h_window(conv_id, conv_data, conv_doc.reference):
+                    skipped_window_open += 1
+                    continue
+
+                # Template baseado no status
+                if normalized_status == "pending_handoff":
+                    template_sid = REOPEN_TEMPLATE_SID_PENDING_HANDOFF
+                    template_name = "handoff_request"
+                elif normalized_status == "bot":
+                    template_sid = REOPEN_TEMPLATE_SID_BOT
+                    template_name = "retomada_bot"
+                else:
+                    template_sid = REOPEN_TEMPLATE_SID_DEFAULT
+                    template_name = "retomada_atendimento"
+
+                user_name = _extract_user_name(conv_data).strip() or "Sr(a)"
+                variables = {"user_name": user_name}
+
+                ok, info = _twilio_send_template(conv_id, template_sid, variables)
+                if not ok:
+                    errors.append({"conversation_id": conv_id, "error": info})
+                    log_event("reopen_batch_error", conversation_id=conv_id, agent_id=agent_id,
+                              error_code=info.get("code"), error_message=info.get("message"),
+                              template_sid=template_sid, old_status=current_status)
+                    continue
+
+                # Mensagem de sistema (aparece na UI)
+                message_id = str(uuid.uuid4())
+                by = "system:template"
+                system_text = f"🔓 Conversa reaberta automaticamente por {actor_name}"
+                msg_doc = {
+                    "message_id": message_id,
+                    "direction": "out",
+                    "by": by,
+                    "display_name": "Sistema",
+                    "text": system_text,
+                    "ts": firestore.SERVER_TIMESTAMP,
+                    "twilio_sid": info.get("sid"),
+                    "template_sid": template_sid,
+                    "template_name": template_name,
+                    "is_template": True,
+                }
+                messages_ref(conv_id).document(message_id).set(msg_doc)
+
+                # Atualiza conversa
+                update_data = {
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                    "last_message_text": system_text[:200],
+                    "last_message_by": by,
+                    "reopened_at": firestore.SERVER_TIMESTAMP,
+                    "reopened_by": agent_id,
+                    "last_reopen_template_at": firestore.SERVER_TIMESTAMP,
+                    "last_reopen_template_sid": template_sid,
+                    "last_reopen_template_by": agent_id,
+                    "last_reopen_template_by_name": actor_name,
+                }
+
+                # Normaliza status legado
+                if normalized_status != current_status:
+                    update_data["status"] = normalized_status
+
+                # Padroniza assignee: bot/pending não têm assignee
+                if normalized_status in ("bot", "pending_handoff"):
+                    update_data["assignee"] = firestore.DELETE_FIELD
+                    update_data["assignee_name"] = firestore.DELETE_FIELD
+                else:
+                    # claimed/active devem ter assignee; se faltar, joga para fila
+                    if not conv_data.get("assignee"):
+                        update_data["status"] = "pending_handoff"
+                        update_data["assignee"] = firestore.DELETE_FIELD
+                        update_data["assignee_name"] = firestore.DELETE_FIELD
+                    else:
+                        # Se existir assignee mas não tiver nome, preenche fallback
+                        if not conv_data.get("assignee_name"):
+                            update_data["assignee_name"] = conv_data.get("assignee")
+
+                # Remove legado
+                if "claimed_by" in conv_data:
+                    update_data["claimed_by"] = firestore.DELETE_FIELD
+
+                conv_doc.reference.set(update_data, merge=True)
+
+                reopened_count += 1
+                log_event("conversation_reopened_batch", conversation_id=conv_id,
+                          old_status=current_status, new_status=update_data.get("status", normalized_status),
+                          template_sid=template_sid, twilio_sid=info.get("sid"), actor=agent_id)
+
+        app.logger.info("Reopen batch done: reopened=%s skipped_recent=%s skipped_window_open=%s checked=%s errors=%s",
+                        reopened_count, skipped_recent, skipped_window_open, checked, len(errors))
+
+        return jsonify(
+            success=True,
+            reopened_count=reopened_count,
+            skipped_recent=skipped_recent,
+            skipped_window_open=skipped_window_open,
+            checked=checked,
+            errors=errors[:50],
+        ), 200
+
     except Exception as e:
-        app.logger.error(f"Error reopening outdated conversations: {e}")
-        return jsonify(error={"code":"REOPEN_ERROR","message":str(e)}), 500
+        app.logger.error("Error reopening outdated conversations: %s", e, exc_info=True)
+        return jsonify(error={"code": "REOPEN_ERROR", "message": str(e)}), 500
 
 # ================== Cache e SPA fallback ==================
 @app.after_request
