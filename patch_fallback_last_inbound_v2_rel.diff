@@ -1,0 +1,37 @@
+--- a/crm-api/app.py
++++ b/crm-api/app.py
+@@ -381,6 +381,34 @@
+                             pass
+                     break
+ 
++        # 3) Fallback robusto: se ainda não achou inbound (p.ex. ts com tipos mistos),
++        # varre inbound sem order_by e pega o maior timestamp.
++        if last_dt is None:
++            try:
++                latest_dt = None
++                for snap in (messages_ref(conversation_id)
++                             .where("direction", "==", "in")
++                             .stream()):
++                    d = snap.to_dict() or {}
++                    dt = _coerce_ts_to_dt(d.get("ts"))
++                    if dt and (latest_dt is None or dt > latest_dt):
++                        latest_dt = dt
++
++                last_dt = latest_dt
++
++                if last_dt:
++                    # Salva em formato consistente no doc da conversa (datetime naive UTC)
++                    try:
++                        dt_write = last_dt.astimezone(timezone.utc).replace(tzinfo=None)
++                        (conv_doc_ref or conv_ref(conversation_id)).set(
++                            {"last_inbound_at": dt_write, "updated_at": firestore.SERVER_TIMESTAMP},
++                            merge=True
++                        )
++                    except Exception:
++                        pass
++            except Exception:
++                pass
++
+         # Sem inbound = janela fechada (para WhatsApp, precisa template)
+         if last_dt is None:
+             app.logger.info("[24h] %s: sem inbound -> fora da janela", conversation_id)
