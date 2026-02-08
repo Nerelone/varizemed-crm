@@ -6,7 +6,10 @@ export type Conversation = {
   conversation_id: string;
   status: ConversationStatus;
   assignee?: string | null;
+  assignee_name?: string | null;
   user_name?: string | null;
+  wa_profile_name?: string | null;
+  tags?: string[] | null;
   last_message_text?: string | null;
   updated_at?: string | null;
 };
@@ -42,6 +45,10 @@ export async function handoffConversation(conversationId: string) {
   return api(`/api/admin/conversations/${encodeURIComponent(conversationId)}/handoff`, { method: "POST" });
 }
 
+export async function takeoverConversation(conversationId: string) {
+  return api(`/api/admin/conversations/${encodeURIComponent(conversationId)}/takeover`, { method: "POST" });
+}
+
 export async function resolveConversation(conversationId: string) {
   return api(`/api/admin/conversations/${encodeURIComponent(conversationId)}/resolve`, { method: "POST" });
 }
@@ -57,6 +64,13 @@ export async function updateUserName(conversationId: string, userName: string) {
   return api(`/api/admin/conversations/${encodeURIComponent(conversationId)}/user-name`, {
     method: "POST",
     body: { user_name: userName }
+  });
+}
+
+export async function updateConversationTags(conversationId: string, tags: string[]) {
+  return api(`/api/admin/conversations/${encodeURIComponent(conversationId)}/tags`, {
+    method: "POST",
+    body: { tags }
   });
 }
 
