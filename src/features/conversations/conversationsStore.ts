@@ -31,7 +31,7 @@ const ConversationsContext = createContext<ConversationsContextValue | null>(nul
 const TAB_CONFIG: Record<ConversationsTab, { status: string; mine?: boolean; limit?: number }> = {
   bot: { status: "bot", limit: 50 },
   pending: { status: "pending_handoff", limit: 50 },
-  claimed: { status: "claimed,active", mine: true, limit: 50 },
+  claimed: { status: "claimed,active", limit: 50 },
   resolved: { status: "resolved", limit: 100 }
 };
 
@@ -64,6 +64,33 @@ export function ConversationsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     cursorsRef.current = cursorsByTab;
   }, [cursorsByTab]);
+
+  useEffect(() => {
+    if (!selectedConversation) return;
+    const all = [
+      ...conversationsByTab.bot,
+      ...conversationsByTab.pending,
+      ...conversationsByTab.claimed,
+      ...conversationsByTab.resolved
+    ];
+    const updated = all.find((conv) => conv.conversation_id === selectedConversation.conversation_id);
+    if (updated) {
+      const prevTags = Array.isArray(selectedConversation.tags) ? selectedConversation.tags.join("|") : "";
+      const nextTags = Array.isArray(updated.tags) ? updated.tags.join("|") : "";
+      const unchanged =
+        selectedConversation.status === updated.status &&
+        selectedConversation.assignee === updated.assignee &&
+        selectedConversation.assignee_name === updated.assignee_name &&
+        selectedConversation.user_name === updated.user_name &&
+        selectedConversation.wa_profile_name === updated.wa_profile_name &&
+        selectedConversation.last_message_text === updated.last_message_text &&
+        selectedConversation.updated_at === updated.updated_at &&
+        prevTags === nextTags;
+      if (!unchanged) {
+        setSelectedConversation((prev) => (prev ? { ...prev, ...updated } : updated));
+      }
+    }
+  }, [conversationsByTab, selectedConversation]);
 
   const loadTab = useCallback(async (tab: ConversationsTab, append = false) => {
     const config = TAB_CONFIG[tab];

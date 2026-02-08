@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.2.0] - 2026-02-08
+
+### Added
+- WhatsApp ProfileName capture from Twilio and display in CRM
+- Separate display of declared name (CX) vs WhatsApp profile name
+- Conversation takeover to transfer active/claimed conversations
+- Quick replies per user with optional shortcuts
+- Conversation tags with colored labels
+- Assignee name surfaced in conversation list and header
+- Basic spellcheck-enabled composer (textarea)
+
+### Changed
+- Claimed/active conversations are visible to all agents; only assignee can send
+- Conversation list shows declared name + WhatsApp profile + phone number
+- Selected conversation refreshes on list updates without switching selection
+
+### Fixed
+- List and message view sync when switching conversations
+
 ## [1.1.0] - 2026-01-16
 
 ### Added

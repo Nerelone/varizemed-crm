@@ -1,5 +1,6 @@
-﻿import { Conversation } from "./conversationsApi";
+import { Conversation } from "./conversationsApi";
 import { formatRelativeTime } from "../../shared/utils/time";
+import { getTagOption } from "../../shared/constants/tags";
 
 function getStatusLabel(status: string) {
   const labels: Record<string, string> = {
@@ -47,8 +48,18 @@ export function ConversationRow({
   const statusClass = conversation.status === "pending_handoff" ? "pending" : conversation.status;
   const initials = getAvatarInitials(conversation.conversation_id);
   const avatarBg = getAvatarColor(conversation.conversation_id);
-  const displayName = conversation.user_name || conversation.conversation_id;
-  const showSecondary = Boolean(conversation.user_name);
+  const declaredName = (conversation.user_name || "").trim();
+  const waName = (conversation.wa_profile_name || "").trim();
+  const phone = conversation.conversation_id;
+  const assigneeLabel = (conversation.assignee_name || conversation.assignee || "").trim();
+  const showAssignee = Boolean(assigneeLabel);
+
+  const declaredDisplay = declaredName || "-";
+  const waDisplay = waName || "Sem nome";
+  const primaryLine = `Nome declarado: ${declaredDisplay}`;
+  const secondaryLines: string[] = [`Perfil wapp: ${waDisplay} (${phone})`];
+
+  const tags = Array.isArray(conversation.tags) ? conversation.tags : [];
 
   return (
     <div className={`conv-item ${selected ? "selected" : ""}`} onClick={onSelect}>
@@ -57,13 +68,37 @@ export function ConversationRow({
       </div>
       <div className="conv-content">
         <div className="conv-header">
-          <span className="conv-phone">{displayName}</span>
+          <span className="conv-phone">{primaryLine}</span>
           <span className={`conv-status ${statusClass}`}>{getStatusLabel(conversation.status)}</span>
         </div>
-        {showSecondary ? (
-          <span className="conv-phone-secondary">{conversation.conversation_id}</span>
+        {secondaryLines.map((line, idx) => (
+          <span className="conv-phone-secondary" key={`${line}-${idx}`}>
+            {line}
+          </span>
+        ))}
+        {showAssignee ? (
+          <span className="conv-assignee">Atendente: {assigneeLabel}</span>
         ) : null}
         <div className="conv-preview">{conversation.last_message_text || "Sem mensagens"}</div>
+        {tags.length > 0 ? (
+          <div className="tag-list">
+            {tags.map((tag, idx) => {
+              const opt = getTagOption(tag);
+              const label = opt?.label || tag;
+              const color = opt?.color || "#334155";
+              const textColor = opt?.textColor || "#e2e8f0";
+              return (
+                <span
+                  className="tag"
+                  style={{ background: color, color: textColor }}
+                  key={`${tag}-${idx}`}
+                >
+                  {label}
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
         <div className="conv-time">{formatRelativeTime(conversation.updated_at)}</div>
       </div>
     </div>
