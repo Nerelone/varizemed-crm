@@ -79,11 +79,16 @@ def list_conversations():
         dd = d.to_dict() or {}
         up = dd.get("updated_at")
         user_name = _extract_user_name(dd)
+        wa_profile_name = dd.get("wa_profile_name")
+        tags = dd.get("tags") if isinstance(dd.get("tags"), list) else []
         items.append({
             "conversation_id": d.id,
             "status": dd.get("status"),
             "assignee": dd.get("assignee"),
+            "assignee_name": dd.get("assignee_name"),
             "user_name": user_name,
+            "wa_profile_name": wa_profile_name,
+            "tags": tags,
             "last_message_text": dd.get("last_message_text", ""),
             "last_message_by": dd.get("last_message_by"),
             "updated_at": _iso(up) if up else None,
@@ -115,7 +120,10 @@ def get_conversation(conversation_id):
         "conversation_id": snap.id,
         "status": d.get("status"),
         "assignee": d.get("assignee"),
+        "assignee_name": d.get("assignee_name"),
         "user_name": user_name,
+        "wa_profile_name": d.get("wa_profile_name"),
+        "tags": d.get("tags") if isinstance(d.get("tags"), list) else [],
         "last_message_text": d.get("last_message_text", ""),
         "last_message_by": d.get("last_message_by"),
         "updated_at": _iso(up) if up else None,
@@ -155,6 +163,51 @@ def update_user_name(conversation_id):
 
     log_event("update_user_name", conversation_id=conversation_id, agent_id=agent_id, user_name=user_name)
     return jsonify(ok=True)
+
+
+@bp.post("/api/admin/conversations/<conversation_id>/tags")
+@login_required
+def update_conversation_tags(conversation_id):
+    """Atualiza tags da conversa"""
+    unauth = _require_auth(allow_session=True)
+    if unauth:
+        return unauth
+
+    data = request.get_json() or {}
+    tags = data.get("tags", [])
+    if not isinstance(tags, list):
+        return jsonify(error={"code": "BAD_REQUEST", "message": "tags deve ser uma lista"}), 400
+
+    normalized = []
+    seen = set()
+    for raw in tags:
+        tag = str(raw or "").strip()
+        if not tag:
+            continue
+        if len(tag) > 40:
+            return jsonify(error={"code": "BAD_REQUEST", "message": "Tag muito longa (max 40 caracteres)"}), 400
+        if tag in seen:
+            continue
+        seen.add(tag)
+        normalized.append(tag)
+
+    if len(normalized) > 12:
+        return jsonify(error={"code": "BAD_REQUEST", "message": "Máximo de 12 tags por conversa"}), 400
+
+    ref = conv_ref(conversation_id)
+    snap = ref.get()
+    if not snap.exists:
+        return jsonify(error={"code": "NOT_FOUND", "message": "Conversa não encontrada"}), 404
+
+    agent_id, _ = _agent_from_headers()
+
+    ref.set({
+        "tags": normalized,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }, merge=True)
+
+    log_event("update_tags", conversation_id=conversation_id, agent_id=agent_id, tags=normalized)
+    return jsonify(ok=True, tags=normalized)
 
 
 @bp.get("/api/admin/conversations/<conversation_id>/messages")
@@ -245,6 +298,50 @@ def claim_conversation(conversation_id):
 
     log_event("claim", conversation_id=conversation_id, agent_id=agent_id, old_status=st, new_status="claimed")
     return jsonify(ok=True, new_status="claimed")
+
+
+@bp.post("/api/admin/conversations/<conversation_id>/takeover")
+@login_required
+def takeover_conversation(conversation_id):
+    """Assumir conversa já claimed/active (transferência)"""
+    unauth = _require_auth(allow_session=True)
+    if unauth:
+        return unauth
+
+    agent_id, display_name = _agent_from_headers()
+    if not agent_id:
+        return jsonify(error={"code": "BAD_REQUEST", "message": "agent_id obrigatório"}), 400
+
+    ref = conv_ref(conversation_id)
+    snap = ref.get()
+    if not snap.exists:
+        return jsonify(error={"code": "NOT_FOUND", "message": "Conversa não encontrada"}), 404
+
+    d = snap.to_dict() or {}
+    st = d.get("status", "")
+    if st not in ("claimed", "active"):
+        return jsonify(error={"code": "INVALID", "message": f"status atual={st} não permite takeover"}), 400
+
+    old_assignee = d.get("assignee")
+    if old_assignee == agent_id:
+        return jsonify(ok=True, new_status=st, already=True)
+
+    ref.set({
+        "assignee": agent_id,
+        "assignee_name": (display_name or agent_id),
+        "updated_at": firestore.SERVER_TIMESTAMP,
+        "handoff_active": False,
+    }, merge=True)
+
+    log_event(
+        "takeover",
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        old_assignee=old_assignee,
+        new_assignee=agent_id,
+        status=st,
+    )
+    return jsonify(ok=True, new_status=st)
 
 
 @bp.post("/api/admin/conversations/<conversation_id>/handoff")
