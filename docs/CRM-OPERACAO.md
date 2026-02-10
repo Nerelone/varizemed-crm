@@ -21,6 +21,13 @@ Componentes principais:
 - Tags por conversa com cores (configuradas em src/shared/constants/tags.ts).
 - Composer com textarea e corretor basico (spellcheck).
 
+## Atualizacoes Recentes (10/02/2026)
+
+- Busca de conversa movida para server-side (historico completo, nao limitado aos itens carregados na UI).
+- Busca por tag suportada na mesma caixa de busca.
+- Atalhos visuais de tags (chips clicaveis) na lista de conversas.
+- Botao "Limpar" na busca para remover texto e filtro de tag rapidamente.
+
 
 ## Estrutura do Repo
 
@@ -146,6 +153,29 @@ Fluxos:
 - Cada conversa pode ter ate 12 tags.
 - Cores definidas em `src/shared/constants/tags.ts`.
 - Tags aparecem na lista e no header da conversa.
+- A busca aceita tags na mesma caixa de telefone:
+  - `tag:urgente`
+  - `#urgente`
+  - `urgente` (quando for uma tag conhecida)
+- Tambem ha chips de tags abaixo da busca para filtro rapido.
+- O botao `Limpar` remove texto de busca e tag ativa.
+
+## Busca de Conversas
+
+- Endpoint: `GET /api/admin/conversations/search`
+- Parametros:
+  - `q`: texto de busca (telefone ou tag)
+  - `limit`: maximo de itens (1 a 100)
+- Busca por telefone:
+  - tenta ID exato e prefixo com formatos legados (`+5511...` e `5511...`)
+  - consulta por `conversation_id` e fallback por `document_id`
+- Busca por tag:
+  - usa `array_contains` no campo `tags`
+  - aceita `tag:<nome>`, `#<nome>` e tag conhecida direta
+- Exemplo:
+```http
+GET /api/admin/conversations/search?q=tag:urgente&limit=50
+```
 
 ## Janela de 24h
 

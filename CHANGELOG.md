@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Server-side conversation search endpoint for full-history lookup (`GET /api/admin/conversations/search`)
+- Search by tag in CRM (`tag:<nome>`, `#<nome>`, or direct known tag like `urgente`)
+- Quick tag chips in conversation list search
+- "Limpar" button in search box to clear text and active tag filter
+
+### Changed
+- Conversation search no longer depends only on locally loaded lists (50 per tab)
+- Search now combines local results with backend results for better recall
+
 
 ## [1.2.0] - 2026-02-08
 
