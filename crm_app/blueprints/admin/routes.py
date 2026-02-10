@@ -37,6 +37,30 @@ from ...core import (
 from . import bp
 
 
+def _normalize_phone_query(value: str) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def _serialize_conversation(doc, data: dict | None = None):
+    dd = data or doc.to_dict() or {}
+    up = dd.get("updated_at")
+    user_name = _extract_user_name(dd)
+    wa_profile_name = dd.get("wa_profile_name")
+    tags = dd.get("tags") if isinstance(dd.get("tags"), list) else []
+    return {
+        "conversation_id": doc.id,
+        "status": dd.get("status"),
+        "assignee": dd.get("assignee"),
+        "assignee_name": dd.get("assignee_name"),
+        "user_name": user_name,
+        "wa_profile_name": wa_profile_name,
+        "tags": tags,
+        "last_message_text": dd.get("last_message_text", ""),
+        "last_message_by": dd.get("last_message_by"),
+        "updated_at": _iso(up) if up else None,
+    }
+
+
 @bp.get("/api/admin/conversations")
 @login_required
 def list_conversations():
@@ -76,23 +100,7 @@ def list_conversations():
     docs = list(q.stream())
     items = []
     for d in docs:
-        dd = d.to_dict() or {}
-        up = dd.get("updated_at")
-        user_name = _extract_user_name(dd)
-        wa_profile_name = dd.get("wa_profile_name")
-        tags = dd.get("tags") if isinstance(dd.get("tags"), list) else []
-        items.append({
-            "conversation_id": d.id,
-            "status": dd.get("status"),
-            "assignee": dd.get("assignee"),
-            "assignee_name": dd.get("assignee_name"),
-            "user_name": user_name,
-            "wa_profile_name": wa_profile_name,
-            "tags": tags,
-            "last_message_text": dd.get("last_message_text", ""),
-            "last_message_by": dd.get("last_message_by"),
-            "updated_at": _iso(up) if up else None,
-        })
+        items.append(_serialize_conversation(d))
 
     out = {"items": items}
     if len(items) == limit and items:
@@ -100,6 +108,95 @@ def list_conversations():
         out["next_cursor"] = _encode_cursor({"updated_at": last_item["updated_at"], "id": last_item["conversation_id"]})
 
     return jsonify(out)
+
+
+@bp.get("/api/admin/conversations/search")
+@login_required
+def search_conversations():
+    unauth = _require_auth(allow_session=True, allow_query=True)
+    if unauth:
+        return unauth
+
+    raw_query = (request.args.get("q") or "").strip()
+    if not raw_query:
+        return jsonify({"items": []})
+
+    limit = int(request.args.get("limit") or 20)
+    limit = max(1, min(limit, 100))
+
+    normalized_query = _normalize_phone_query(raw_query)
+    if not normalized_query:
+        return jsonify({"items": []})
+
+    seen_ids = set()
+    docs_with_data: list[tuple] = []
+
+    def add_doc(snapshot):
+        if not snapshot.exists or snapshot.id in seen_ids:
+            return
+        data = snapshot.to_dict() or {}
+        docs_with_data.append((snapshot, data))
+        seen_ids.add(snapshot.id)
+
+    exact_candidates = [
+        raw_query,
+        raw_query.replace("whatsapp:", "").strip(),
+        raw_query.replace("whatsapp:", "").replace("+", "").strip(),
+        f"+{normalized_query}",
+        f"whatsapp:+{normalized_query}",
+        normalized_query,
+    ]
+    for conv_id in exact_candidates:
+        if not conv_id or conv_id in seen_ids:
+            continue
+        add_doc(conv_ref(conv_id).get())
+        if len(docs_with_data) >= limit:
+            break
+
+    prefix_candidates = [normalized_query, f"+{normalized_query}"]
+    for prefix in prefix_candidates:
+        if len(docs_with_data) >= limit:
+            break
+        upper_bound = f"{prefix}\uf8ff"
+        remaining = limit - len(docs_with_data)
+        prefix_query = (
+            fs.collection(FS_CONV_COLL)
+            .where("conversation_id", ">=", prefix)
+            .where("conversation_id", "<=", upper_bound)
+            .order_by("conversation_id")
+            .limit(remaining * 3)
+        )
+        for snap in prefix_query.stream():
+            add_doc(snap)
+            if len(docs_with_data) >= limit:
+                break
+
+    for prefix in prefix_candidates:
+        if len(docs_with_data) >= limit:
+            break
+        upper_bound = f"{prefix}\uf8ff"
+        remaining = limit - len(docs_with_data)
+        try:
+            doc_id_prefix_query = (
+                fs.collection(FS_CONV_COLL)
+                .where(firestore.FieldPath.document_id(), ">=", prefix)
+                .where(firestore.FieldPath.document_id(), "<=", upper_bound)
+                .order_by(firestore.FieldPath.document_id())
+                .limit(remaining * 3)
+            )
+            for snap in doc_id_prefix_query.stream():
+                add_doc(snap)
+                if len(docs_with_data) >= limit:
+                    break
+        except Exception as exc:
+            _logger().warning("search by document id failed for %s: %s", prefix, exc)
+
+    docs_with_data.sort(
+        key=lambda item: _coerce_ts_to_dt(item[1].get("updated_at")) or datetime(1970, 1, 1, tzinfo=timezone.utc),
+        reverse=True,
+    )
+    items = [_serialize_conversation(doc, data) for doc, data in docs_with_data[:limit]]
+    return jsonify({"items": items})
 
 
 @bp.get("/api/admin/conversations/<conversation_id>")
@@ -113,21 +210,7 @@ def get_conversation(conversation_id):
     if not snap.exists:
         return jsonify(error={"code": "NOT_FOUND", "message": "Conversa nao encontrada"}), 404
 
-    d = snap.to_dict() or {}
-    up = d.get("updated_at")
-    user_name = _extract_user_name(d)
-    return jsonify({
-        "conversation_id": snap.id,
-        "status": d.get("status"),
-        "assignee": d.get("assignee"),
-        "assignee_name": d.get("assignee_name"),
-        "user_name": user_name,
-        "wa_profile_name": d.get("wa_profile_name"),
-        "tags": d.get("tags") if isinstance(d.get("tags"), list) else [],
-        "last_message_text": d.get("last_message_text", ""),
-        "last_message_by": d.get("last_message_by"),
-        "updated_at": _iso(up) if up else None,
-    })
+    return jsonify(_serialize_conversation(snap))
 
 
 @bp.post("/api/admin/conversations/<conversation_id>/user-name")

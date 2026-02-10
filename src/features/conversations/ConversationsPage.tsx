@@ -11,7 +11,7 @@ import {
   getTabTitle,
   useConversationsStore
 } from "./conversationsStore";
-import { Conversation, getConversation, reopenOutdatedConversations } from "./conversationsApi";
+import { Conversation, reopenOutdatedConversations, searchConversations } from "./conversationsApi";
 
 function usePageVisibility() {
   const [isVisible, setIsVisible] = useState(!document.hidden);
@@ -67,7 +67,7 @@ export function ConversationsPage() {
 
   const [isConnected, setIsConnected] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResult, setSearchResult] = useState<Conversation | null>(null);
+  const [remoteSearchResults, setRemoteSearchResults] = useState<Conversation[]>([]);
   const [searchStatus, setSearchStatus] = useState<"idle" | "searching" | "not_found">("idle");
   const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -80,7 +80,7 @@ export function ConversationsPage() {
 
   const conversations = conversationsByTab[currentTab];
 
-  const searchResults = useMemo(() => {
+  const localSearchResults = useMemo(() => {
     const query = searchQuery.trim();
     if (!query) return [];
 
@@ -96,6 +96,22 @@ export function ConversationsPage() {
       (conv.last_message_text || "").includes(query)
     );
   }, [searchQuery, conversationsByTab]);
+
+  const searchResults = useMemo(() => {
+    const query = searchQuery.trim();
+    if (!query) return [];
+
+    const merged = new Map<string, Conversation>();
+    for (const conv of localSearchResults) {
+      merged.set(conv.conversation_id, conv);
+    }
+    for (const conv of remoteSearchResults) {
+      if (!merged.has(conv.conversation_id)) {
+        merged.set(conv.conversation_id, conv);
+      }
+    }
+    return Array.from(merged.values());
+  }, [localSearchResults, remoteSearchResults, searchQuery]);
 
   useEffect(() => {
     if ("Notification" in window && Notification.permission === "default") {
@@ -160,31 +176,47 @@ export function ConversationsPage() {
   useEffect(() => {
     const query = searchQuery.trim();
     if (!query) {
-      setSearchResult(null);
+      setRemoteSearchResults([]);
       setSearchStatus("idle");
       return;
     }
 
-    if (searchResults.length > 0) {
-      setSearchResult(null);
+    setRemoteSearchResults([]);
+
+    if (localSearchResults.length > 0) {
       setSearchStatus("idle");
-      return;
+    } else {
+      setSearchStatus("searching");
     }
 
-    setSearchStatus("searching");
+    let cancelled = false;
     const handle = window.setTimeout(async () => {
       try {
-        const conv = await getConversation(query);
-        setSearchResult(conv);
-        setSearchStatus("idle");
+        const response = await searchConversations({ query, limit: 50 });
+        if (cancelled) return;
+        const items = response.items || [];
+        setRemoteSearchResults(items);
+        if (items.length > 0 || localSearchResults.length > 0) {
+          setSearchStatus("idle");
+        } else {
+          setSearchStatus("not_found");
+        }
       } catch {
-        setSearchResult(null);
-        setSearchStatus("not_found");
+        if (cancelled) return;
+        setRemoteSearchResults([]);
+        if (localSearchResults.length > 0) {
+          setSearchStatus("idle");
+        } else {
+          setSearchStatus("not_found");
+        }
       }
-    }, 300);
+    }, 250);
 
-    return () => window.clearTimeout(handle);
-  }, [searchQuery, searchResults.length]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [localSearchResults.length, searchQuery]);
 
   const handleTabChange = useCallback((tab: ConversationsTab) => {
     setCurrentTab(tab);
@@ -218,7 +250,7 @@ export function ConversationsPage() {
   const isSearchMode = Boolean(searchQuery.trim());
 
   const listConversations: Conversation[] = searchQuery.trim()
-    ? (searchResults.length > 0 ? searchResults : searchResult ? [searchResult] : [])
+    ? searchResults
     : conversations;
 
   const emptyLabel = searchQuery.trim()
