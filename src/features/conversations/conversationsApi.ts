@@ -37,6 +37,13 @@ export async function getConversation(conversationId: string) {
   return api<Conversation>(`/api/admin/conversations/${encodeURIComponent(conversationId)}`);
 }
 
+export async function searchConversations(params: { query: string; limit?: number }) {
+  const search = new URLSearchParams();
+  search.set("q", params.query);
+  search.set("limit", String(params.limit ?? 50));
+  return api<ListConversationsResponse>(`/api/admin/conversations/search?${search.toString()}`);
+}
+
 export async function claimConversation(conversationId: string) {
   return api(`/api/admin/conversations/${encodeURIComponent(conversationId)}/claim`, { method: "POST" });
 }
