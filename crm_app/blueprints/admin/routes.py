@@ -1,5 +1,6 @@
 ﻿import uuid
 from datetime import datetime, timezone, timedelta
+import unicodedata
 
 from flask import Response, jsonify, request, session
 from google.cloud import firestore
@@ -37,8 +38,91 @@ from ...core import (
 from . import bp
 
 
+KNOWN_SEARCH_TAGS = {
+    "marcacao",
+    "remarcacao",
+    "duvida",
+    "exames",
+    "urgente",
+    "reclamacao",
+    "retorno",
+    "convenio",
+}
+
+
 def _normalize_phone_query(value: str) -> str:
     return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def _normalize_tag_token(value: str) -> str:
+    token = (value or "").strip().casefold()
+    if not token:
+        return ""
+    token = unicodedata.normalize("NFKD", token)
+    token = "".join(ch for ch in token if not unicodedata.combining(ch))
+    return "".join(ch for ch in token if ch.isalnum() or ch in ("_", "-"))
+
+
+def _extract_tag_query(raw_query: str) -> str | None:
+    query = (raw_query or "").strip()
+    if not query:
+        return None
+
+    lower = query.casefold()
+    is_explicit_tag = False
+    if lower.startswith("tag:"):
+        is_explicit_tag = True
+        query = query[4:].strip()
+    elif query.startswith("#"):
+        is_explicit_tag = True
+        query = query[1:].strip()
+
+    normalized = _normalize_tag_token(query)
+    if not normalized:
+        return None
+
+    if is_explicit_tag:
+        return normalized
+
+    return normalized if normalized in KNOWN_SEARCH_TAGS else None
+
+
+def _sort_and_serialize_conversations(docs_with_data: list[tuple], limit: int):
+    docs_with_data.sort(
+        key=lambda item: _coerce_ts_to_dt(item[1].get("updated_at")) or datetime(1970, 1, 1, tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return [_serialize_conversation(doc, data) for doc, data in docs_with_data[:limit]]
+
+
+def _search_conversations_by_tag(tag_query: str, limit: int):
+    seen_ids = set()
+    docs_with_data: list[tuple] = []
+
+    def add_doc(snapshot):
+        if not snapshot.exists or snapshot.id in seen_ids:
+            return
+        data = snapshot.to_dict() or {}
+        docs_with_data.append((snapshot, data))
+        seen_ids.add(snapshot.id)
+
+    query_limit = max(limit * 5, limit)
+    tag_candidates = {
+        tag_query,
+        tag_query.lower(),
+        tag_query.upper(),
+        tag_query.capitalize(),
+    }
+    for candidate in tag_candidates:
+        if len(docs_with_data) >= query_limit:
+            break
+        q = fs.collection(FS_CONV_COLL).where("tags", "array_contains", candidate).limit(query_limit)
+        for snap in q.stream():
+            add_doc(snap)
+            if len(docs_with_data) >= query_limit:
+                break
+
+    return {"items": _sort_and_serialize_conversations(docs_with_data, limit)}
 
 
 def _serialize_conversation(doc, data: dict | None = None):
@@ -124,6 +208,10 @@ def search_conversations():
     limit = int(request.args.get("limit") or 20)
     limit = max(1, min(limit, 100))
 
+    tag_query = _extract_tag_query(raw_query)
+    if tag_query:
+        return jsonify(_search_conversations_by_tag(tag_query, limit))
+
     normalized_query = _normalize_phone_query(raw_query)
     if not normalized_query:
         return jsonify({"items": []})
@@ -191,11 +279,7 @@ def search_conversations():
         except Exception as exc:
             _logger().warning("search by document id failed for %s: %s", prefix, exc)
 
-    docs_with_data.sort(
-        key=lambda item: _coerce_ts_to_dt(item[1].get("updated_at")) or datetime(1970, 1, 1, tzinfo=timezone.utc),
-        reverse=True,
-    )
-    items = [_serialize_conversation(doc, data) for doc, data in docs_with_data[:limit]]
+    items = _sort_and_serialize_conversations(docs_with_data, limit)
     return jsonify({"items": items})
 
 

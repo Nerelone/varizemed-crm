@@ -1,5 +1,6 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnDot } from "../../shared/ui/ConnDot";
+import { TAG_OPTIONS } from "../../shared/constants/tags";
 import { useToast } from "../../shared/ui/Toast";
 import { useAuth } from "../auth/authStore";
 import { AuthPage } from "../auth/AuthPage";
@@ -12,6 +13,36 @@ import {
   useConversationsStore
 } from "./conversationsStore";
 import { Conversation, reopenOutdatedConversations, searchConversations } from "./conversationsApi";
+
+const KNOWN_TAG_IDS = new Set(TAG_OPTIONS.map((tag) => tag.id));
+
+function normalizeTagToken(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9_-]/g, "");
+}
+
+function extractTagQuery(value: string): string | null {
+  const query = value.trim();
+  if (!query) return null;
+
+  let candidate = query;
+  const lower = query.toLowerCase();
+  const isExplicitTag = lower.startsWith("tag:") || query.startsWith("#");
+  if (lower.startsWith("tag:")) {
+    candidate = query.slice(4).trim();
+  } else if (query.startsWith("#")) {
+    candidate = query.slice(1).trim();
+  }
+
+  const normalized = normalizeTagToken(candidate);
+  if (!normalized) return null;
+  if (isExplicitTag) return normalized;
+  return KNOWN_TAG_IDS.has(normalized) ? normalized : null;
+}
 
 function usePageVisibility() {
   const [isVisible, setIsVisible] = useState(!document.hidden);
@@ -79,6 +110,7 @@ export function ConversationsPage() {
   const shouldShowProfile = profileOpen || profileIncomplete;
 
   const conversations = conversationsByTab[currentTab];
+  const activeTagQuery = useMemo(() => extractTagQuery(searchQuery), [searchQuery]);
 
   const localSearchResults = useMemo(() => {
     const query = searchQuery.trim();
@@ -91,11 +123,17 @@ export function ConversationsPage() {
       ...conversationsByTab.resolved
     ];
 
+    if (activeTagQuery) {
+      return all.filter((conv) =>
+        (conv.tags || []).some((tag) => normalizeTagToken(String(tag || "")) === activeTagQuery)
+      );
+    }
+
     return all.filter((conv) =>
       conv.conversation_id.includes(query) ||
       (conv.last_message_text || "").includes(query)
     );
-  }, [searchQuery, conversationsByTab]);
+  }, [activeTagQuery, conversationsByTab, searchQuery]);
 
   const searchResults = useMemo(() => {
     const query = searchQuery.trim();
@@ -225,6 +263,16 @@ export function ConversationsPage() {
     }
   }, [loadTab, setCurrentTab]);
 
+  const handleTagShortcut = useCallback((tagId: string) => {
+    setSearchQuery(`tag:${tagId}`);
+  }, []);
+
+  const handleClearSearch = useCallback(() => {
+    setSearchQuery("");
+    setRemoteSearchResults([]);
+    setSearchStatus("idle");
+  }, []);
+
   const handleSelectConversation = useCallback(async (conversationId: string) => {
     await selectConversation(conversationId);
   }, [selectConversation]);
@@ -322,10 +370,36 @@ export function ConversationsPage() {
           <div className="search-box">
             <span className="search-icon">🔍</span>
             <input
-              placeholder="Digite o número de telefone..."
+              placeholder="Telefone ou tag (ex.: tag:urgente)"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
             />
+            {searchQuery.trim() ? (
+              <button
+                type="button"
+                className="search-clear-btn"
+                onClick={handleClearSearch}
+                title="Limpar busca"
+              >
+                Limpar
+              </button>
+            ) : null}
+          </div>
+          <div className="search-tags">
+            {TAG_OPTIONS.map((tag) => {
+              const isActive = activeTagQuery === tag.id;
+              return (
+                <button
+                  key={tag.id}
+                  className={`search-tag-chip ${isActive ? "active" : ""}`}
+                  style={isActive ? { background: tag.color, color: tag.textColor || "#111", borderColor: tag.color } : undefined}
+                  onClick={() => handleTagShortcut(tag.id)}
+                  type="button"
+                >
+                  {tag.label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="card">
