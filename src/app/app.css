@@ -144,6 +144,53 @@ body{
   font-size:14px;
 }
 
+.search-clear-btn{
+  border:1px solid var(--border);
+  background:#0b1326;
+  color:var(--muted);
+  border-radius:8px;
+  padding:7px 10px;
+  font-size:12px;
+  font-weight:600;
+  cursor:pointer;
+  transition:all 0.2s;
+}
+
+.search-clear-btn:hover{
+  color:var(--text);
+  border-color:#2b3644;
+  background:#111b34;
+}
+
+.search-tags{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin-top:-2px;
+}
+
+.search-tag-chip{
+  border:1px solid var(--border);
+  border-radius:999px;
+  padding:5px 10px;
+  background:#0b1326;
+  color:var(--muted);
+  cursor:pointer;
+  font-size:11px;
+  font-weight:600;
+  transition:all 0.2s;
+}
+
+.search-tag-chip:hover{
+  border-color:#2b3644;
+  color:var(--text);
+  transform:translateY(-1px);
+}
+
+.search-tag-chip.active{
+  font-weight:700;
+}
+
 /* Conversations list */
 .card{
   background:var(--panel);
