@@ -35,10 +35,12 @@ body{
 .icon-btn:hover{background:var(--border)}
 .icon-btn:disabled{opacity:0.5;cursor:not-allowed}
 .icon-dropdown{position:relative}
-.dropdown-menu{display:none;position:absolute;top:100%;left:0;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:4px;min-width:200px;z-index:20}
+.dropdown-menu{display:none;position:absolute;top:100%;left:0;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px;min-width:280px;z-index:20}
 .dropdown-menu.show{display:block}
 .dropdown-item{background:none;border:none;color:var(--text);padding:8px 12px;width:100%;text-align:left;cursor:pointer;border-radius:4px}
 .dropdown-item:hover{background:var(--border)}
+.dropdown-label{font-size:11px;color:var(--muted);padding:6px 8px 4px 8px;font-weight:700;text-transform:uppercase;letter-spacing:0.3px}
+.dropdown-divider{height:1px;background:var(--border);margin:6px 4px}
 .spacer{flex:1}
 .btn{
   background:#1f2937;
@@ -772,6 +774,62 @@ noscript{
   resize:vertical
 }
 
+.reopen-preview-modal{
+  max-width:760px;
+  width:min(760px, 95vw);
+  max-height:85vh;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+
+.reopen-preview-note{
+  margin:0 0 10px 0;
+  color:var(--muted);
+  font-size:12px;
+}
+
+.reopen-preview-stats{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:6px;
+  font-size:12px;
+  margin-bottom:10px;
+}
+
+.reopen-preview-list{
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:8px;
+  overflow:auto;
+  max-height:44vh;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.reopen-preview-item{
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:8px;
+  font-size:12px;
+  background:var(--card);
+}
+
+.reopen-preview-text{
+  margin-top:4px;
+  color:var(--muted);
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.reopen-preview-actions{
+  margin-top:10px;
+  display:flex;
+  justify-content:flex-end;
+}
+
 @media (max-width: 900px){
   .quick-replies-grid{
     grid-template-columns:1fr
@@ -779,5 +837,8 @@ noscript{
   .quick-reply-actions{
     flex-direction:row;
     flex-wrap:wrap
+  }
+  .reopen-preview-stats{
+    grid-template-columns:1fr;
   }
 }

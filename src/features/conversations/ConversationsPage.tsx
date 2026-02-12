@@ -12,7 +12,14 @@ import {
   getTabTitle,
   useConversationsStore
 } from "./conversationsStore";
-import { Conversation, reopenOutdatedConversations, searchConversations } from "./conversationsApi";
+import {
+  Conversation,
+  getReopenBatchCapabilities,
+  ReopenBatchResponse,
+  ReopenBatchScope,
+  reopenOutdatedConversations,
+  searchConversations
+} from "./conversationsApi";
 
 const KNOWN_TAG_IDS = new Set(TAG_OPTIONS.map((tag) => tag.id));
 
@@ -43,6 +50,25 @@ function extractTagQuery(value: string): string | null {
   if (isExplicitTag) return normalized;
   return KNOWN_TAG_IDS.has(normalized) ? normalized : null;
 }
+
+type ReopenBatchCapabilitiesState = {
+  isStaging: boolean;
+  hasStagingTestScope: boolean;
+  testPhoneCount: number;
+};
+
+type ReopenResultDialogState = {
+  mode: "preview" | "execute";
+  scopeLabel: string;
+  eligibleCount: number;
+  skippedWindowOpen: number;
+  skippedRecent: number;
+  skippedNotAllowed: number;
+  checked: number;
+  reopenedCount: number;
+  errorCount: number;
+  sampleConversations: NonNullable<ReopenBatchResponse["sample_conversations"]>;
+};
 
 function usePageVisibility() {
   const [isVisible, setIsVisible] = useState(!document.hidden);
@@ -77,6 +103,13 @@ function showDesktopNotification(title: string, body: string) {
   }
 }
 
+function formatPreviewTimestamp(value?: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("pt-BR");
+}
+
 export function ConversationsPage() {
   const { push } = useToast();
   const auth = useAuth();
@@ -102,6 +135,12 @@ export function ConversationsPage() {
   const [searchStatus, setSearchStatus] = useState<"idle" | "searching" | "not_found">("idle");
   const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [reopenResultDialog, setReopenResultDialog] = useState<ReopenResultDialogState | null>(null);
+  const [reopenCapabilities, setReopenCapabilities] = useState<ReopenBatchCapabilitiesState>({
+    isStaging: false,
+    hasStagingTestScope: false,
+    testPhoneCount: 0
+  });
 
   const isVisible = usePageVisibility();
   const pendingCountRef = useRef(0);
@@ -171,6 +210,31 @@ export function ConversationsPage() {
     const handler = () => setAdminMenuOpen(false);
     document.addEventListener("click", handler);
     return () => document.removeEventListener("click", handler);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getReopenBatchCapabilities()
+      .then((capabilities) => {
+        if (cancelled) return;
+        setReopenCapabilities({
+          isStaging: Boolean(capabilities.is_staging),
+          hasStagingTestScope: Boolean(capabilities.has_staging_test_scope),
+          testPhoneCount: Number(capabilities.test_phone_count || 0)
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setReopenCapabilities({
+          isStaging: false,
+          hasStagingTestScope: false,
+          testPhoneCount: 0
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -277,21 +341,72 @@ export function ConversationsPage() {
     await selectConversation(conversationId);
   }, [selectConversation]);
 
-  const handleAdminAction = useCallback(async () => {
-    if (!confirm("Tem certeza que deseja reabrir todas as conversas não resolvidas fora da janela de 24h?")) {
+  const handleReopenBatchAction = useCallback(async (scope: ReopenBatchScope, preview: boolean) => {
+    const scopeLabel =
+      scope === "bot"
+        ? "Bot"
+        : scope === "active"
+          ? "Ativas"
+          : "Teste (staging)";
+
+    const stagingPhonesText =
+      reopenCapabilities.testPhoneCount > 0
+        ? ` (${reopenCapabilities.testPhoneCount} numero(s) autorizado(s))`
+        : "";
+
+    let confirmMessage = "";
+    if (scope === "bot" && !preview) {
+      confirmMessage = "Voce vai reabrir todas as conversas fora da janela de 24h em Bot. Confirme a operacao.";
+    } else if (scope === "active" && !preview) {
+      confirmMessage = "Voce vai reabrir todas as conversas fora da janela de 24h em Ativas. Confirme a operacao.";
+    } else if (scope === "staging_test" && !preview) {
+      confirmMessage = `Voce vai reabrir somente as conversas de teste${stagingPhonesText} fora da janela de 24h. Confirme a operacao.`;
+    } else if (scope === "staging_test" && preview) {
+      confirmMessage = `Voce vai pre-visualizar somente as conversas de teste${stagingPhonesText} fora da janela de 24h. Nenhuma mensagem sera enviada. Confirma?`;
+    } else {
+      confirmMessage = `Voce vai pre-visualizar a reabertura de conversas ${scopeLabel} fora da janela de 24h. Nenhuma mensagem sera enviada. Confirma?`;
+    }
+
+    if (!confirm(confirmMessage)) {
       return;
     }
 
     try {
-      await reopenOutdatedConversations();
-      push("Conversas reabertas com sucesso!");
-      await refreshAll();
+      const result = await reopenOutdatedConversations({ scope, preview });
+      if (preview) {
+        setReopenResultDialog({
+          mode: "preview",
+          scopeLabel,
+          eligibleCount: Number(result.eligible_count || 0),
+          skippedWindowOpen: Number(result.skipped_window_open || 0),
+          skippedRecent: Number(result.skipped_recent || 0),
+          skippedNotAllowed: Number(result.skipped_not_allowed || 0),
+          checked: Number(result.checked || 0),
+          reopenedCount: Number(result.reopened_count || 0),
+          errorCount: Array.isArray(result.errors) ? result.errors.length : 0,
+          sampleConversations: Array.isArray(result.sample_conversations) ? result.sample_conversations : []
+        });
+      } else {
+        setReopenResultDialog({
+          mode: "execute",
+          scopeLabel,
+          eligibleCount: Number(result.eligible_count || 0),
+          skippedWindowOpen: Number(result.skipped_window_open || 0),
+          skippedRecent: Number(result.skipped_recent || 0),
+          skippedNotAllowed: Number(result.skipped_not_allowed || 0),
+          checked: Number(result.checked || 0),
+          reopenedCount: Number(result.reopened_count || 0),
+          errorCount: Array.isArray(result.errors) ? result.errors.length : 0,
+          sampleConversations: []
+        });
+        await refreshAll();
+      }
     } catch (error) {
-      push(`Erro: ${(error as Error)?.message || "Falha ao reabrir conversas"}`);
+      push(`Erro: ${(error as Error)?.message || "Falha ao processar reabertura em lote"}`);
     } finally {
       setAdminMenuOpen(false);
     }
-  }, [push, refreshAll]);
+  }, [push, refreshAll, reopenCapabilities.testPhoneCount]);
 
   const listTitle = getTabTitle(currentTab);
   const showPendingAlert = conversationsByTab.pending.length > 0;
@@ -321,10 +436,35 @@ export function ConversationsPage() {
             >
               🔧
             </button>
-            <div className={`dropdown-menu ${adminMenuOpen ? "show" : ""}`}>
-              <button className="dropdown-item" onClick={handleAdminAction}>
-                Reabrir conversas fora de 24h não resolvidas
+            <div
+              className={`dropdown-menu ${adminMenuOpen ? "show" : ""}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="dropdown-label">Reabertura em lote (fora da janela de 24h)</div>
+              <button className="dropdown-item" onClick={() => handleReopenBatchAction("bot", true)}>
+                Pré-visualizar Bot
               </button>
+              <button className="dropdown-item" onClick={() => handleReopenBatchAction("bot", false)}>
+                Reabrir Bot
+              </button>
+              <button className="dropdown-item" onClick={() => handleReopenBatchAction("active", true)}>
+                Pré-visualizar Ativas
+              </button>
+              <button className="dropdown-item" onClick={() => handleReopenBatchAction("active", false)}>
+                Reabrir Ativas
+              </button>
+              {reopenCapabilities.hasStagingTestScope ? (
+                <>
+                  <div className="dropdown-divider" />
+                  <div className="dropdown-label">Teste no Staging</div>
+                  <button className="dropdown-item" onClick={() => handleReopenBatchAction("staging_test", true)}>
+                    Pré-visualizar Teste
+                  </button>
+                  <button className="dropdown-item" onClick={() => handleReopenBatchAction("staging_test", false)}>
+                    Reabrir Teste
+                  </button>
+                </>
+              ) : null}
             </div>
           </div>
           <button className="icon-btn" title="Agenda" disabled>
@@ -431,6 +571,55 @@ export function ConversationsPage() {
         canClose={!profileIncomplete}
         onClose={() => setProfileOpen(false)}
       />
+
+      <div className={`overlay ${reopenResultDialog ? "show" : ""}`}>
+        <div className="modal reopen-preview-modal">
+          <h3 style={{ margin: "0 0 10px 0" }}>
+            {reopenResultDialog?.mode === "preview" ? "Pré-visualização" : "Reabertura concluída"} • {reopenResultDialog?.scopeLabel || ""}
+          </h3>
+          <p className="reopen-preview-note">
+            {reopenResultDialog?.mode === "preview"
+              ? "Nenhuma mensagem foi enviada. Este resultado mostra o que aconteceria na execução real."
+              : "A reabertura foi executada. Confira o resumo abaixo."}
+          </p>
+          <div className="reopen-preview-stats">
+            {reopenResultDialog?.mode === "execute" ? (
+              <>
+                <div><strong>Reabertas:</strong> {reopenResultDialog?.reopenedCount || 0}</div>
+                <div><strong>Erros:</strong> {reopenResultDialog?.errorCount || 0}</div>
+              </>
+            ) : null}
+            <div><strong>Elegíveis:</strong> {reopenResultDialog?.eligibleCount || 0}</div>
+            <div><strong>Dentro da janela:</strong> {reopenResultDialog?.skippedWindowOpen || 0}</div>
+            <div><strong>Reabertura recente:</strong> {reopenResultDialog?.skippedRecent || 0}</div>
+            <div><strong>Fora da whitelist:</strong> {reopenResultDialog?.skippedNotAllowed || 0}</div>
+            <div><strong>Avaliadas:</strong> {reopenResultDialog?.checked || 0}</div>
+          </div>
+
+          {reopenResultDialog?.mode === "preview" ? (
+            <div className="reopen-preview-list">
+              {(reopenResultDialog?.sampleConversations || []).length === 0 ? (
+                <div className="empty-state">Nenhuma conversa elegível para mostrar na amostra.</div>
+              ) : (
+                (reopenResultDialog?.sampleConversations || []).map((item) => (
+                  <div className="reopen-preview-item" key={item.conversation_id}>
+                    <div><strong>{item.conversation_id}</strong></div>
+                    <div>Status: {item.status || "-"}</div>
+                    <div>Atualizada em: {formatPreviewTimestamp(item.updated_at)}</div>
+                    <div className="reopen-preview-text">{item.last_message_text || "-"}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
+
+          <div className="reopen-preview-actions">
+            <button className="btn btn-acc" onClick={() => setReopenResultDialog(null)}>
+              Fechar
+            </button>
+          </div>
+        </div>
+      </div>
     </>
   );
 }

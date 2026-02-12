@@ -28,6 +28,14 @@ Componentes principais:
 - Atalhos visuais de tags (chips clicaveis) na lista de conversas.
 - Botao "Limpar" na busca para remover texto e filtro de tag rapidamente.
 
+## Atualizacoes Recentes (12/02/2026)
+
+- Ferramenta de reabertura em lote separada por escopo no menu administrativo (`Bot` e `Ativas`).
+- Pre-visualizacao de reabertura em lote com resumo e amostra no popup.
+- Escopo `Teste (staging)` para validar a mesma logica em telefones permitidos.
+- Popup de resultado tambem apos execucao real da reabertura (sem lista, com resumo).
+- Preview ajustado para nao alterar `updated_at` ao calcular janela de 24h.
+
 
 ## Estrutura do Repo
 
@@ -183,6 +191,81 @@ O backend calcula se a ultima mensagem inbound esta fora da janela.
 - Usa `last_inbound_at` se existir no documento.
 - Caso nao exista, busca mensagens recentes e preenche `last_inbound_at` (lazy).
 
+## Reabertura em Lote (Ferramentas Administrativas)
+
+Acesso:
+- Clique em `Ferramentas Administrativas` (icone de chave).
+- Bloco: `Reabertura em lote (fora da janela de 24h)`.
+
+Acoes disponiveis:
+- `Pre-visualizar Bot`
+- `Reabrir Bot`
+- `Pre-visualizar Ativas`
+- `Reabrir Ativas`
+- `Pre-visualizar Teste` e `Reabrir Teste` (apenas quando staging test estiver habilitado)
+
+Escopos:
+- `Bot`: conversa com status `bot`.
+- `Ativas`: conversas com status `pending_handoff`, `pending`, `claimed`, `active`.
+- `Teste (staging)`: mesma regra do lote geral, mas filtrada por lista de telefones permitidos.
+
+Comportamento do Preview:
+- Nao envia template no Twilio.
+- Nao reabre conversa de fato.
+- Nao altera `updated_at` por causa da checagem de janela de 24h.
+- Exibe popup com:
+  - `Elegiveis`
+  - `Dentro da janela`
+  - `Reabertura recente`
+  - `Fora da whitelist`
+  - `Avaliadas`
+  - amostra de conversas elegiveis
+
+Comportamento da Execucao:
+- Executa reabertura real e envio de template para elegiveis.
+- Exibe popup de resumo com:
+  - `Reabertas`
+  - `Erros`
+  - `Elegiveis`
+  - `Dentro da janela`
+  - `Reabertura recente`
+  - `Fora da whitelist`
+  - `Avaliadas`
+- Nao mostra toast de sucesso (toast fica para erro de request).
+
+Endpoints:
+- `GET /api/admin/reopen-outdated-conversations/capabilities`
+- `POST /api/admin/reopen-outdated-conversations`
+  - body:
+    - `scope`: `all | bot | active | staging_test`
+    - `preview`: `true | false`
+
+## Staging Test (telefones permitidos)
+
+Variaveis necessarias no servico de staging:
+- `APP_ENV=staging`
+- `REOPEN_TEST_ALLOWED_PHONES=5531983440484,5531971957758`
+
+Notas:
+- A comparacao de telefone e normalizada (somente digitos), entao pode salvar com ou sem `+`.
+- O botao de teste so aparece quando `capabilities.has_staging_test_scope=true`.
+
+Exemplo de update (PowerShell):
+```powershell
+gcloud run services update crm-api-staging `
+  --region=southamerica-east1 `
+  --update-env-vars "^@^APP_ENV=staging@REOPEN_TEST_ALLOWED_PHONES=5531983440484,5531971957758"
+```
+
+Validacao rapida:
+```javascript
+fetch("/api/admin/reopen-outdated-conversations", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ scope: "staging_test", preview: true })
+}).then(r => r.json()).then(console.log)
+```
+
 
 
 ## Nome Declarado x Perfil Wapp
@@ -207,6 +290,8 @@ Opcionais:
 - `FS_CONV_COLL`, `FS_MSG_SUBCOLL`, `FS_USERS_COLL`
 - `TWILIO_REOPEN_TEMPLATE_SID*`
 - `RATE_LIMIT_SEND_PER_CONVO_PER_SEC`
+- `APP_ENV` (usar `staging` para liberar escopo de teste)
+- `REOPEN_TEST_ALLOWED_PHONES` (lista CSV de telefones permitidos no staging test)
 
 
 
@@ -247,7 +332,7 @@ Observacao: o `Dockerfile` copia a pasta `web/`, entao o build precisa existir l
 - Para reabrir conversa fora da janela de 24h, use o botao "Reabrir Conversa".
 - Use "Respostas" para respostas rapidas individuais.
 - Use "Tags" para classificar a conversa.
-- Menu admin permite reabrir conversas antigas em lote.
+- Menu admin permite reabrir conversas antigas em lote por escopo (`Bot`/`Ativas`) com `Pre-visualizar`.
 
 ## Troubleshooting Rapido
 
