@@ -19,6 +19,36 @@ export type ListConversationsResponse = {
   next_cursor?: string;
 };
 
+export type ReopenBatchScope = "all" | "bot" | "active" | "staging_test";
+
+export type ReopenBatchCapabilities = {
+  is_staging: boolean;
+  has_staging_test_scope: boolean;
+  test_phone_count: number;
+  scopes: Array<{ id: ReopenBatchScope; label: string }>;
+};
+
+export type ReopenBatchResponse = {
+  success: boolean;
+  preview: boolean;
+  scope: ReopenBatchScope | string;
+  is_staging: boolean;
+  reopened_count?: number;
+  eligible_count?: number;
+  skipped_recent: number;
+  skipped_window_open: number;
+  skipped_not_allowed: number;
+  checked: number;
+  sample_count?: number;
+  sample_conversations?: Array<{
+    conversation_id: string;
+    status: string;
+    updated_at?: string | null;
+    last_message_text?: string;
+  }>;
+  errors?: Array<{ conversation_id: string; error: { code?: string; message?: string } }>;
+};
+
 export async function listConversations(params: {
   status: string;
   limit?: number;
@@ -81,8 +111,16 @@ export async function updateConversationTags(conversationId: string, tags: strin
   });
 }
 
-export async function reopenOutdatedConversations() {
-  return api(`/api/admin/reopen-outdated-conversations`, {
-    method: "POST"
+export async function getReopenBatchCapabilities() {
+  return api<ReopenBatchCapabilities>(`/api/admin/reopen-outdated-conversations/capabilities`);
+}
+
+export async function reopenOutdatedConversations(params?: { scope?: ReopenBatchScope; preview?: boolean }) {
+  return api<ReopenBatchResponse>(`/api/admin/reopen-outdated-conversations`, {
+    method: "POST",
+    body: {
+      scope: params?.scope ?? "all",
+      preview: Boolean(params?.preview),
+    }
   });
 }

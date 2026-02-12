@@ -368,7 +368,12 @@ def _twilio_send_template(to_e164_plus: str, template_sid: str, variables: dict 
         return False, {"code": "TWILIO_REQ", "message": str(e)}
 
 
-def _is_outside_24h_window(conversation_id: str, conv_data: dict | None = None, conv_doc_ref=None) -> bool:
+def _is_outside_24h_window(
+    conversation_id: str,
+    conv_data: dict | None = None,
+    conv_doc_ref=None,
+    cache_last_inbound_at: bool = True,
+) -> bool:
     """Verifica se a última mensagem INBOUND está fora da janela de 24h."""
     try:
         last_inbound_at = None
@@ -387,10 +392,10 @@ def _is_outside_24h_window(conversation_id: str, conv_data: dict | None = None, 
                 d = snap.to_dict() or {}
                 if (d.get("direction") or "").lower() == "in":
                     last_dt = _coerce_ts_to_dt(d.get("ts"))
-                    if last_dt:
+                    if last_dt and cache_last_inbound_at:
                         try:
                             (conv_doc_ref or conv_ref(conversation_id)).set(
-                                {"last_inbound_at": d.get("ts"), "updated_at": firestore.SERVER_TIMESTAMP},
+                                {"last_inbound_at": d.get("ts")},
                                 merge=True,
                             )
                         except Exception:

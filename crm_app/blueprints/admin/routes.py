@@ -1,5 +1,6 @@
 ﻿import uuid
 from datetime import datetime, timezone, timedelta
+import os
 import unicodedata
 
 from flask import Response, jsonify, request, session
@@ -48,6 +49,60 @@ KNOWN_SEARCH_TAGS = {
     "retorno",
     "convenio",
 }
+
+REOPEN_BATCH_SCOPES = {
+    "all": ["bot", "pending_handoff", "pending", "claimed", "active"],
+    "bot": ["bot"],
+    "active": ["pending_handoff", "pending", "claimed", "active"],
+    "staging_test": ["bot", "pending_handoff", "pending", "claimed", "active"],
+}
+
+
+def _parse_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _is_staging_environment() -> bool:
+    explicit_env = (
+        os.getenv("APP_ENV")
+        or os.getenv("ENVIRONMENT")
+        or os.getenv("FLASK_ENV")
+        or ""
+    ).strip().lower()
+    if explicit_env in ("staging", "stage", "test", "testing", "dev", "development"):
+        return True
+
+    service_name = (os.getenv("K_SERVICE") or "").strip().lower()
+    return "staging" in service_name
+
+
+def _load_reopen_test_allowed_phones() -> set[str]:
+    raw = (os.getenv("REOPEN_TEST_ALLOWED_PHONES") or "").strip()
+    if not raw:
+        return set()
+    out = set()
+    for item in raw.split(","):
+        norm = _normalize_phone_query(item)
+        if norm:
+            out.add(norm)
+    return out
+
+
+def _normalize_reopen_scope(value: str) -> str:
+    scope = (value or "").strip().lower()
+    aliases = {
+        "ativas": "active",
+        "ativa": "active",
+        "actives": "active",
+        "all_non_resolved": "all",
+        "staging": "staging_test",
+        "test": "staging_test",
+    }
+    return aliases.get(scope, scope)
 
 
 def _normalize_phone_query(value: str) -> str:
@@ -1062,6 +1117,31 @@ def proxy_media(conversation_id, message_id):
         return jsonify(error={"code": "PROXY_ERROR", "message": str(e)}), 500
 
 
+@bp.get("/api/admin/reopen-outdated-conversations/capabilities")
+@login_required
+def reopen_outdated_conversations_capabilities():
+    unauth = _require_auth(allow_session=True, allow_query=True)
+    if unauth:
+        return unauth
+
+    is_staging = _is_staging_environment()
+    allowed_test_phones = _load_reopen_test_allowed_phones() if is_staging else set()
+
+    scopes = [
+        {"id": "bot", "label": "Bot"},
+        {"id": "active", "label": "Ativas"},
+    ]
+    if is_staging and allowed_test_phones:
+        scopes.append({"id": "staging_test", "label": "Teste (staging)"})
+
+    return jsonify({
+        "is_staging": is_staging,
+        "has_staging_test_scope": bool(is_staging and allowed_test_phones),
+        "test_phone_count": len(allowed_test_phones),
+        "scopes": scopes,
+    }), 200
+
+
 @bp.post("/api/admin/reopen-outdated-conversations")
 @login_required
 def reopen_outdated_conversations():
@@ -1072,14 +1152,46 @@ def reopen_outdated_conversations():
     agent_id, display_name = _agent_from_headers(allow_query=True)
     actor_name = (display_name or agent_id or "Sistema")
 
+    data = request.get_json(silent=True) or {}
+    scope_raw = data.get("scope") if "scope" in data else request.args.get("scope")
+    preview_raw = data.get("preview") if "preview" in data else request.args.get("preview")
+
+    scope = _normalize_reopen_scope(scope_raw or "all")
+    preview = _parse_bool(preview_raw, default=False)
+    is_staging = _is_staging_environment()
+
+    if scope not in REOPEN_BATCH_SCOPES:
+        return jsonify(error={
+            "code": "BAD_SCOPE",
+            "message": "scope inválido. Use: all, bot, active ou staging_test",
+        }), 400
+
+    allowed_test_phones = set()
+    if scope == "staging_test":
+        if not is_staging:
+            return jsonify(error={
+                "code": "FORBIDDEN_SCOPE",
+                "message": "scope staging_test só é permitido em staging",
+            }), 403
+        allowed_test_phones = _load_reopen_test_allowed_phones()
+        if not allowed_test_phones:
+            return jsonify(error={
+                "code": "NO_TEST_PHONES",
+                "message": "REOPEN_TEST_ALLOWED_PHONES não configurado no staging",
+            }), 400
+
     try:
-        candidate_statuses = ["bot", "pending_handoff", "pending", "claimed", "active"]
+        candidate_statuses = REOPEN_BATCH_SCOPES[scope]
         now = datetime.now(timezone.utc)
         reopened_count = 0
+        eligible_count = 0
         skipped_recent = 0
         skipped_window_open = 0
+        skipped_not_allowed = 0
         checked = 0
         errors = []
+        preview_items = []
+        preview_limit = 50
 
         for st in candidate_statuses:
             q = fs.collection(FS_CONV_COLL).where("status", "==", st).stream()
@@ -1088,16 +1200,39 @@ def reopen_outdated_conversations():
                 conv_id = conv_doc.id
                 conv_data = conv_doc.to_dict() or {}
                 current_status = (conv_data.get("status") or st)
-
                 normalized_status = "pending_handoff" if current_status == "pending" else current_status
+
+                if scope == "staging_test":
+                    conv_phone_norm = _normalize_phone_query(conv_id)
+                    if conv_phone_norm not in allowed_test_phones:
+                        skipped_not_allowed += 1
+                        continue
 
                 last_sent_dt = _coerce_ts_to_dt(conv_data.get("last_reopen_template_at"))
                 if last_sent_dt and (now - last_sent_dt) < timedelta(hours=24):
                     skipped_recent += 1
                     continue
 
-                if not _is_outside_24h_window(conv_id, conv_data, conv_doc.reference):
+                if not _is_outside_24h_window(
+                    conv_id,
+                    conv_data,
+                    conv_doc.reference,
+                    cache_last_inbound_at=(not preview),
+                ):
                     skipped_window_open += 1
+                    continue
+
+                eligible_count += 1
+
+                if preview:
+                    if len(preview_items) < preview_limit:
+                        up = conv_data.get("updated_at")
+                        preview_items.append({
+                            "conversation_id": conv_id,
+                            "status": normalized_status,
+                            "updated_at": _iso(up) if up else None,
+                            "last_message_text": (conv_data.get("last_message_text") or "")[:120],
+                        })
                     continue
 
                 if normalized_status == "pending_handoff":
@@ -1131,6 +1266,7 @@ def reopen_outdated_conversations():
                         error_message=info.get("message"),
                         template_sid=template_sid,
                         old_status=current_status,
+                        scope=scope,
                     )
                     errors.append({"conversation_id": conv_id, "error": info})
                     continue
@@ -1193,22 +1329,57 @@ def reopen_outdated_conversations():
                     template_sid=template_sid,
                     twilio_sid=info.get("sid"),
                     actor=agent_id,
+                    scope=scope,
                 )
 
+        if preview:
+            log_event(
+                "reopen_batch_preview",
+                actor=agent_id,
+                scope=scope,
+                checked=checked,
+                eligible_count=eligible_count,
+                skipped_recent=skipped_recent,
+                skipped_window_open=skipped_window_open,
+                skipped_not_allowed=skipped_not_allowed,
+            )
+            return jsonify(
+                success=True,
+                preview=True,
+                scope=scope,
+                is_staging=is_staging,
+                eligible_count=eligible_count,
+                skipped_recent=skipped_recent,
+                skipped_window_open=skipped_window_open,
+                skipped_not_allowed=skipped_not_allowed,
+                checked=checked,
+                sample_count=len(preview_items),
+                sample_conversations=preview_items,
+            ), 200
+
         _logger().info(
-            "Reopen batch done: reopened=%s skipped_recent=%s skipped_window_open=%s checked=%s errors=%s",
+            "Reopen batch done: scope=%s reopened=%s eligible=%s skipped_recent=%s skipped_window_open=%s "
+            "skipped_not_allowed=%s checked=%s errors=%s",
+            scope,
             reopened_count,
+            eligible_count,
             skipped_recent,
             skipped_window_open,
+            skipped_not_allowed,
             checked,
             len(errors),
         )
 
         return jsonify(
             success=True,
+            preview=False,
+            scope=scope,
+            is_staging=is_staging,
             reopened_count=reopened_count,
+            eligible_count=eligible_count,
             skipped_recent=skipped_recent,
             skipped_window_open=skipped_window_open,
+            skipped_not_allowed=skipped_not_allowed,
             checked=checked,
             errors=errors[:50],
         ), 200
