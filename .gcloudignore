@@ -1,0 +1,19 @@
+# Files excluded from Cloud Build source upload (`gcloud run deploy --source`).
+
+# gcloud metadata and VCS internals
+.gcloudignore
+.git
+.gitignore
+
+# Never upload local dependencies
+node_modules/
+**/node_modules/
+
+# Not needed at runtime in Cloud Run image
+docs/
+scripts/
+src/
+public/
+
+# Reuse local ignore rules
+#!include:.gitignore
