@@ -12,10 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Search by tag in CRM (`tag:<nome>`, `#<nome>`, or direct known tag like `urgente`)
 - Quick tag chips in conversation list search
 - "Limpar" button in search box to clear text and active tag filter
+- Batch reopen capabilities endpoint (`GET /api/admin/reopen-outdated-conversations/capabilities`)
+- Batch reopen with scope and preview (`POST /api/admin/reopen-outdated-conversations` with `scope` + `preview`)
+- Staging-only test scope (`staging_test`) restricted by `REOPEN_TEST_ALLOWED_PHONES`
+- Result modal after batch reopen execution (same popup family used by preview)
 
 ### Changed
 - Conversation search no longer depends only on locally loaded lists (50 per tab)
 - Search now combines local results with backend results for better recall
+- Administrative tools now separate batch reopen by scope (`Bot` and `Ativas`)
+- Batch reopen success feedback now uses modal summary instead of toast
+
+### Fixed
+- Preview flow no longer updates conversation `updated_at` while checking 24h window
 
 
 ## [1.2.0] - 2026-02-08
